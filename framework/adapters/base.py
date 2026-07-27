@@ -3,7 +3,10 @@ from __future__ import annotations
 import abc
 from typing import Any
 
+from framework.harness.logging_setup import get_logger
 from framework.semantic.mapping import SemanticMapping
+
+logger = get_logger("adapter")
 
 
 class BaseAdapter(abc.ABC):
@@ -26,4 +29,10 @@ class BaseAdapter(abc.ABC):
         """원시 응답의 코드값들을 self.mapping을 통해 정규화값으로 치환해 반환."""
 
     def execute(self, **kwargs: Any) -> dict[str, Any]:
-        return self.normalize(self.call(**kwargs))
+        name = type(self).__name__
+        logger.debug("%s.call(%s)", name, kwargs)
+        raw = self.call(**kwargs)
+        logger.debug("%s.call() -> %s", name, raw)
+        result = self.normalize(raw)
+        logger.debug("%s.normalize() -> %s", name, result)
+        return result

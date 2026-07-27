@@ -3,7 +3,11 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Callable
 
+from framework.harness.logging_setup import get_logger
+from framework.harness.tracing import tracer
 from framework.registry.decorators import ToolRegistry, WorkflowStepSpec
+
+logger = get_logger("state_machine")
 
 
 class MaxRetriesExceeded(Exception):
@@ -32,27 +36,37 @@ class StateMachine:
         steps = self.steps()
         current = self.entry
         retries: dict[str, int] = {}
+        logger.info("state machine start: entry='%s'", self.entry)
 
         while current is not None:
             spec = steps.get(current)
             if spec is None:
+                logger.error("unknown workflow step '%s'", current)
                 raise KeyError(f"unknown workflow step '{current}'")
 
-            outcome = spec.func(context)
+            with tracer.span(name=current, kind="step"):
+                outcome = spec.func(context)
 
             if spec.next is None:
+                logger.info("state machine done: step='%s' (no next map)", current)
                 return context
 
             next_step = spec.next.get(outcome)
             if next_step is None:
+                logger.error("step '%s' produced unmapped outcome '%s'", current, outcome)
                 raise ValueError(f"step '{current}' produced unmapped outcome '{outcome}'")
 
+            logger.info("step '%s' -> outcome=%r -> next='%s'", current, outcome, next_step)
+
             if next_step == TERMINAL:
+                logger.info("state machine done: step='%s'", current)
                 return context
 
             if next_step == current:
                 retries[current] = retries.get(current, 0) + 1
+                logger.debug("step '%s' retry %d/%s", current, retries[current], spec.max_retries or "∞")
                 if spec.max_retries and retries[current] > spec.max_retries:
+                    logger.error("step '%s' exceeded max_retries=%d", current, spec.max_retries)
                     raise MaxRetriesExceeded(f"step '{current}' exceeded max_retries={spec.max_retries}")
 
             current = next_step

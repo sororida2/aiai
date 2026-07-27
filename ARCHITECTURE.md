@@ -11,7 +11,8 @@ framework/                  ← 엔진. 새 서비스를 추가해도 손대지 
 ├── orchestrator.py          ← Triage 라우팅 (Orchestrator, AgentRunner Protocol)
 ├── harness/
 │   ├── guardrail.py          ← Input/Output 검증 체인 (GuardrailChain)
-│   └── tracing.py            ← Trace/Span 중첩 기록 (Tracer)
+│   ├── tracing.py            ← Trace/Span 중첩 기록 + 그 자리에서 로그로도 출력 (Tracer)
+│   └── logging_setup.py      ← LOG_LEVEL 환경변수 기반 로깅 설정 (configure_logging, get_logger)
 ├── prompts/store.py         ← 공통/도메인 프롬프트 계층 조립 (PromptStore)
 ├── prompts/common/          ← 공통 오케스트레이터 프롬프트 (orchestrator.md)
 ├── semantic/mapping.py      ← 레거시 원시값→정규화값 (SemanticMapping, MappedValue)
@@ -40,7 +41,7 @@ services/                   ← 설정. 새 서비스 추가 시 여기만 늘�
 main.py                     ← 조립 지점 (discover_services + registry.validate(), build_orchestrator,
                                 OpenAIRunner/FirstMatchRunner) + 실행 예시. 서비스 추가 시 더 이상 손대지 않아도 됨.
 guides/legacy_adapter_guide.md ← 신규 서비스 추가 가이드
-.env / .env.example         ← OPENAI_API_KEY, OPENAI_MODEL (.env는 커밋 안 함; weather는 키 불필요)
+.env / .env.example         ← OPENAI_API_KEY, OPENAI_MODEL, LOG_LEVEL (.env는 커밋 안 함; weather는 키 불필요)
 ```
 
 ## 컴포넌트별 역할
@@ -74,22 +75,29 @@ guides/legacy_adapter_guide.md ← 신규 서비스 추가 가이드
 `main.py`의 `build_orchestrator()`는 `OPENAI_API_KEY`가 있으면 `OpenAIRunner`(실제 모델에 tool 카탈로그를 주고 name 하나만 고르게 함)를, 없으면 `FirstMatchRunner`(요청 문자열에 tool 이름이 포함되는지만 검사하는 오프라인 스텁)를 `agent_runner`로 선택한다. 두 클래스 모두 `AgentRunner` Protocol만 구현하므로 `orchestrator.py` 자체는 어느 쪽을 쓰든 안 바뀐다 — 이 스위칭도 `main.py`(조립 지점)의 책임이다.
 
 ### `harness/guardrail.py` — 개입 권한을 가진 검증
-`GuardrailChain.run()`은 `registry.guardrail_for(tool_name)`으로 선언을 읽어 input → 호출 → output 순으로 검증한다. **엔진 코드 어디에도 tool 이름이 하드코딩되지 않는다** — `if tool_name == ...` 분기가 생기면 안티패턴이라는 설계 원칙(`ai_framework_2.md`)이 그대로 구현된 지점. `output_schema`에 `{"choices": [...]}` 형태를 넣으면 enum 제약으로 동작한다 (`subscription_status.workflow`의 `status`/`status_confidence` 필드 참고).
+`GuardrailChain.run()`은 `registry.guardrail_for(tool_name)`으로 선언을 읽어 input → 호출 → output 순으로 검증한다. **엔진 코드 어디에도 tool 이름이 하드코딩되지 않는다** — `if tool_name == ...` 분기가 생기면 안티패턴이라는 설계 원칙(`ai_framework_2.md`)이 그대로 구현된 지점. `output_schema`에 `{"choices": [...]}` 형태를 넣으면 enum 제약으로 동작한다 (`subscription_status.workflow`의 `status`/`status_confidence` 필드 참고). 스키마 없음/통과는 `DEBUG`로, 위반은 예외를 던지기 직전 `ERROR`로 로깅한다.
 
-### `harness/tracing.py` — 관측
+### `harness/logging_setup.py` — 로그 레벨 설정
+`configure_logging()`이 `LOG_LEVEL` 환경변수(기본 `INFO`)로 표준 `logging`을 한 번 설정한다. `main.py`가 `load_dotenv()` 직후, `discover_services()`보다 먼저 호출해야 discovery/validate 단계 로그도 같은 레벨로 잡힌다(`main.py` 참고). `get_logger(name)`은 전부 `agent_loop.<name>` 네임스페이스 아래 로거를 돌려주므로, 특정 모듈만 레벨을 따로 올리고 싶으면(예: `logging.getLogger("agent_loop.adapter").setLevel(logging.DEBUG)`) 표준 `logging` API를 그대로 쓰면 된다.
+
+### `harness/tracing.py` — 관측이자 로깅의 뼈대
 `Tracer`는 스택 기반으로 `Span`을 중첩시킨다. `start_trace`가 루트(kind="orchestrator")를 열고, `span()` 호출마다 현재 스택 최상단의 자식으로 붙는다. Tool이 늘어나도 상위 구조(Trace → Orchestrator Span → Tool Span*)는 그대로 유지된다는 설계가 스택 구현으로 자연히 보장됨.
 
+각 `start_trace`/`span` 진입·종료 시점에 `INFO` 레벨로 로그를 찍고, 중첩 깊이(`len(self._stack)`)만큼 들여쓰기를 붙인다 — `Trace`/`Span` 객체(`tracer.current_trace`)는 원래도 만들어지고 있었지만 그걸 읽어서 보여주는 코드가 어디에도 없었던 게 실제 gap이었다(§ 로깅 절 참고). `workflow/state_machine.py`가 각 `@workflow_step` 실행을 `tracer.span(kind="step")`으로 감싸면서, tool 단위보다 한 단계 더 세밀한 "이 tool 안에서 지금 어느 스텝을 도는지"까지 같은 메커니즘으로 로그에 잡힌다.
+
+`span()`은 활성 trace가 없는 상태(예: 오케스트레이터를 거치지 않고 `weather(location=...)`처럼 tool 함수를 직접 호출·테스트하는 경우)에도 안전하게 동작한다 — 스택이 비어 있으면 이름 없는 암묵적 루트를 하나 열어서 쓰고, 빠져나갈 때 다시 비운다. `StateMachine.run()`이 항상 `span()`을 쓰게 되면서 이 케이스를 처음부터 고려해야 했다.
+
 ### `prompts/store.py` — 프롬프트 계층
-`common_prompt()` (공통) + `tool_prompt()` (도메인별, `services/<name>/prompts/<tool_name>.md`) + 선택적 few-shot을 `compose()`가 `---`로 이어붙인다. 오케스트레이터는 `common_prompt()`만 써서 `OpenAIRunner.choose_tool()`에 넘기고, 개별 tool 실행 단계는 `compose()`로 조립한 프롬프트를 `framework.llm.openai_client.complete()`에 넘긴다 — `subscription_status.workflow`의 `manual_review`가 이 배선의 살아있는 예시(`tool_dir=services/subscription_status/prompts`, `tool_name="manual_review"`).
+`common_prompt()` (공통) + `tool_prompt()` (도메인별, `services/<name>/prompts/<tool_name>.md`) + 선택적 few-shot을 `compose()`가 `---`로 이어붙인다. 오케스트레이터는 `common_prompt()`만 써서 `OpenAIRunner.choose_tool()`에 넘기고, 개별 tool 실행 단계는 `compose()`로 조립한 프롬프트를 `framework.llm.openai_client.complete()`에 넘긴다 — `subscription_status.workflow`의 `manual_review`가 이 배선의 살아있는 예시(`tool_dir=services/subscription_status/prompts`, `tool_name="manual_review"`). `complete()`는 모델/프롬프트 길이·응답 미리보기를 `INFO`로, system/user 프롬프트 원문 전체를 `DEBUG`로 로깅한다 — 프롬프트에 개인정보가 실릴 수 있는 서비스라면 운영 환경에서 `LOG_LEVEL=DEBUG`를 켜지 않도록 주의.
 
 ### `semantic/mapping.py` — 레거시 의미 정규화
 `SemanticMapping.normalize(raw_value)`가 `mapping.json`을 찾아 `MappedValue(raw, value, confidence)`를 반환. 매핑에 없으면 `UnmappedValueError`로 즉시 실패 (fail-fast). `MappedValue.require_confirmed()`는 `confidence != "confirmed"`면 예외를 던져, `inferred` 값이 판단 분기에 잘못 쓰이는 걸 타입 수준에서 막는다.
 
 ### `adapters/base.py` — 양면 어댑터
-`BaseAdapter`는 `call()`(프로토콜적 면 — 레거시 스펙에 종속)과 `normalize()`(의미론적 면 — `SemanticMapping`에 종속)를 분리해 각각 독립적으로 오버라이드하게 강제한다. `execute()`는 `normalize(call())`로 둘을 합성만 한다.
+`BaseAdapter`는 `call()`(프로토콜적 면 — 레거시 스펙에 종속)과 `normalize()`(의미론적 면 — `SemanticMapping`에 종속)를 분리해 각각 독립적으로 오버라이드하게 강제한다. `execute()`는 `normalize(call())`로 둘을 합성만 한다 — 이 한 곳에서 `call()`/`normalize()` 각각의 입출력을 `DEBUG`로 로깅하므로, 어떤 어댑터를 새로 만들어도(레거시 원시값 로깅을) 따로 구현할 필요가 없다.
 
 ### `workflow/state_machine.py` — 고정 파이프라인 실행기
-`StateMachine.run()`은 `entry`부터 시작해 `WorkflowStepSpec.func(context)`가 반환한 outcome 문자열을 `next` dict에서 찾아 다음 단계로 이동한다. `next_step == current`(자기 자신으로 순환)면 `retries` 카운터를 올리고 `max_retries` 초과 시 `MaxRetriesExceeded`. `next`가 없거나 `TERMINAL("DONE")`이면 종료. 판단(judged) 노드도 그냥 하나의 `workflow_step`으로 등록되며(`@judged` + `@workflow_step` 이중 데코레이터), state machine 입장에서는 outcome이 code-driven이든 model-driven이든 구분하지 않는다 — bounded choices라는 계약만 `@judged`가 보장한다.
+`StateMachine.run()`은 `entry`부터 시작해 `WorkflowStepSpec.func(context)`가 반환한 outcome 문자열을 `next` dict에서 찾아 다음 단계로 이동한다. `next_step == current`(자기 자신으로 순환)면 `retries` 카운터를 올리고 `max_retries` 초과 시 `MaxRetriesExceeded`. `next`가 없거나 `TERMINAL("DONE")`이면 종료. 판단(judged) 노드도 그냥 하나의 `workflow_step`으로 등록되며(`@judged` + `@workflow_step` 이중 데코레이터), state machine 입장에서는 outcome이 code-driven이든 model-driven이든 구분하지 않는다 — bounded choices라는 계약만 `@judged`가 보장한다. 각 스텝 실행을 `tracer.span(name=현재_step, kind="step")`으로 감싸고, 진입("state machine start")·전이("step 'X' -> outcome=... -> next='Y'")·종료를 `INFO`로 로깅한다.
 
 ### 서비스를 조합하는 서비스 — `services/subscription_weather_flow/workflow.py`
 `common/orchestrator.md`가 "하나의 요청이 여러 tool을 필요로 하면 ... 고정 서브 workflow(capability)로 등록되어 있는지 먼저 확인하라"고 지시하는 지점의 구현체. `Orchestrator.handle()`은 요청당 tool 하나만 고르므로(§`orchestrator.py`), 두 tool을 함께 써야 하는 요청은 에이전트가 즉석에서 두 번 호출하게 두지 않고 이렇게 **상위 capability 하나로 미리 고정**한다.
@@ -141,6 +149,35 @@ orchestrator.handle("subscription_weather_flow 조회해줘", applicant_id="A123
      → {"subscription": ..., "weather": ...} 반환, 이 반환값만 오케스트레이터의 guardrail 검증 대상
 ```
 
+## 로깅
+
+`LOG_LEVEL` 환경변수(`.env`, 기본 `INFO`)로 전체 로깅 레벨을 정한다. `main.py`가 기동 직후 `configure_logging()`을 한 번 호출해 표준 `logging`을 설정하므로, 이후 `discover_services()`부터 `orchestrator.handle()`까지 전 과정이 같은 스트림에 시간순으로 찍힌다 — 요청 하나가 오케스트레이터 라우팅부터 state machine의 스텝 전이, 어댑터 호출, OpenAI 판단까지 어떻게 흘렀는지 콘솔 출력 하나로 전부 볼 수 있다(§ 위 "요청 하나의 전체 흐름"과 대응).
+
+- **INFO** (기본값): "지금 어떤 단계를 지나는지"만 보여주는 요약 라인 — trace/span 시작·종료(들여쓰기로 중첩 깊이 표현), state machine 스텝 전이, guardrail 통과 여부, judged 노드의 최종 선택, OpenAI 호출의 모델명·길이·응답 미리보기.
+- **DEBUG**: 위에 더해 어댑터 `call()`/`normalize()`의 실제 payload, guardrail 스킵/통과 상세, OpenAI system/user 프롬프트 원문까지 — 로컬 디버깅 전용. 레거시 원시값이나 프롬프트에 개인정보가 실릴 수 있으므로 운영 환경에서는 켜지 않는다.
+- **WARNING 이상**: 정상 흐름은 거의 안 찍히고 예외 직전 `ERROR` 로그만 남는다.
+
+`LOG_LEVEL=INFO`로 `subscription_status` 하나를 조회하면 이런 식으로 찍힌다(시간·trace id는 매번 다름):
+
+```
+INFO  agent_loop.orchestrator      | request received: 'subscription_status 조회해줘' kwargs={'applicant_id': 'A123'}
+INFO  agent_loop.tracing           | trace 6c80695b start [orchestrator] orchestrator
+INFO  agent_loop.orchestrator      | tool selected: subscription_status (via FirstMatchRunner)
+INFO  agent_loop.tracing           |   span start [tool] subscription_status
+INFO  agent_loop.state_machine     | state machine start: entry='fetch_status'
+INFO  agent_loop.tracing           |     span start [step] fetch_status
+INFO  agent_loop.tracing           |     span end   [step] fetch_status duration=0.000s
+INFO  agent_loop.state_machine     | step 'fetch_status' -> outcome='서류미비' -> next='DONE'
+INFO  agent_loop.state_machine     | state machine done: step='fetch_status'
+INFO  agent_loop.tracing           |   span end   [tool] subscription_status duration=0.001s
+INFO  agent_loop.orchestrator      | request done: tool=subscription_status result_keys=[...]
+INFO  agent_loop.tracing           | trace 6c80695b end   [orchestrator] orchestrator duration=0.001s
+```
+
+`subscription_weather_flow`처럼 tool이 다른 tool을 직접 호출하는 경우, 안쪽 `subscription_status`/`weather`가 각자 여는 `state machine start`/`span`이 바깥쪽 `query_subscription`/`query_weather` 스텝 span 밑에 한 단계 더 들여써져서 나온다 — 합성 관계가 로그 들여쓰기 그대로 드러난다.
+
+**알려진 한계**: `Tracer._stack`은 `Tracer` 싱글턴 하나가 공유하는 상태라 스레드 세이프하지 않다 — 지금 스캐폴드는 요청을 동기적으로 하나씩 처리하는 걸 전제로 하며, 나중에 요청을 동시에(멀티스레드/비동기) 처리하게 되면 이 부분을 `contextvars` 기반으로 바꿔야 한다.
+
 ## 설계축 ↔ 코드 매핑
 
 | 설계 문서의 개념 | 코드 |
@@ -160,6 +197,7 @@ orchestrator.handle("subscription_weather_flow 조회해줘", applicant_id="A123
 | judged 노드의 실제 모델 판단 배선 | `services/subscription_status/workflow.py`의 `manual_review()` — `PromptStore.compose()` + `framework.llm.openai_client.complete()` |
 | 여러 tool을 고정 서브 workflow로 미리 묶기 (에이전트가 즉석에서 여러 tool을 잇지 않게) | `services/subscription_weather_flow/workflow.py`의 최상위 `@tool subscription_weather_flow` — `subscription_status()` → `weather()` 순차 호출, `region` 필드로 데이터 연결 |
 | 서비스 auto-discovery + 기동 시점 일관성 검사 | `registry.discovery.discover_services()` + `registry.decorators.ToolRegistry.validate()` |
+| 레벨 조절 가능한 단계별 로깅 | `harness.logging_setup.configure_logging()`(`LOG_LEVEL`) + `harness.tracing.Tracer`(trace/span을 로그로도 출력) |
 
 ## 신규 서비스 추가 시 손대는 파일 (엔진 불변성 체크)
 

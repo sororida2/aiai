@@ -5,6 +5,10 @@ import inspect
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
+from framework.harness.logging_setup import get_logger
+
+logger = get_logger("registry")
+
 
 @dataclass
 class ToolSpec:
@@ -87,7 +91,12 @@ class ToolRegistry:
         import하는 시점이 아니라, 모든 서비스가 등록을 마친 뒤에 전체 그래프를 봐야 next
         참조처럼 다른 모듈이 등록한 step을 가리키는 경우까지 정확히 검사할 수 있다.
         """
+        logger.info(
+            "validating registry: tools=%d workflow_steps=%d judged=%d guardrails=%d",
+            len(self._tools), len(self._workflow_steps), len(self._judged), len(self._guardrails),
+        )
         if not self._tools:
+            logger.error("no tool registered")
             raise ServiceConsistencyError("no tool registered — services/ 아래 워크플로우가 하나도 import되지 않았다")
 
         step_names = set(self._workflow_steps)
@@ -97,6 +106,7 @@ class ToolRegistry:
             for outcome, target in step_spec.next.items():
                 if target == "DONE" or target in step_names:  # "DONE" == workflow.state_machine.TERMINAL
                     continue
+                logger.error("workflow_step '%s' next[%r]='%s' is unresolved", step_name, outcome, target)
                 raise ServiceConsistencyError(
                     f"workflow_step '{step_name}'의 next[{outcome!r}]='{target}'가 등록된 "
                     f"step 이름 어디에도 없다 (오타 의심)"
@@ -104,6 +114,7 @@ class ToolRegistry:
 
         for judged_name in self._judged:
             if judged_name not in self._workflow_steps:
+                logger.error("judged node '%s' registered without @workflow_step", judged_name)
                 raise ServiceConsistencyError(
                     f"judged node '{judged_name}'가 @workflow_step 없이 등록됐다 — "
                     "judged 노드는 반드시 @workflow_step과 함께 선언해야 state machine에 편입된다"
@@ -112,11 +123,14 @@ class ToolRegistry:
         for tool_name, guardrail_spec in self._guardrails.items():
             tool_spec = self._tools.get(tool_name)
             if tool_spec is not None and guardrail_spec.func is not tool_spec.func:
+                logger.error("tool '%s' guardrail registered on a mismatched function", tool_name)
                 raise ServiceConsistencyError(
                     f"tool '{tool_name}'의 guardrail이 다른 함수에 등록됐다 — "
                     "@guardrail을 @tool보다 아래(먼저 적용되게)에 선언했는지, "
                     "함수 이름이 tool name과 다른지 확인하라"
                 )
+
+        logger.info("registry validation passed")
 
 
 registry = ToolRegistry()
@@ -178,7 +192,9 @@ def judged(choices: tuple[str, ...], *, confidence_required: str = "confirmed") 
         def wrapper(*args: Any, **kwargs: Any) -> str:
             result = func(*args, **kwargs)
             if result not in choices:
+                logger.error("judged node '%s' returned %r, not in bounded choices %s", name, result, choices)
                 raise ValueError(f"judged node '{name}' returned '{result}', not in bounded choices {choices}")
+            logger.info("judged '%s' -> %r", name, result)
             return result
 
         wrapper.__judged_name__ = name

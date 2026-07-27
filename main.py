@@ -7,6 +7,7 @@ from typing import Any
 from dotenv import load_dotenv
 
 import services
+from framework.harness.logging_setup import configure_logging
 from framework.llm.openai_client import complete
 from framework.orchestrator import Orchestrator
 from framework.prompts.store import PromptStore
@@ -14,6 +15,7 @@ from framework.registry.decorators import registry
 from framework.registry.discovery import discover_services
 
 load_dotenv()
+configure_logging()  # LOG_LEVEL 환경변수(기본 INFO) — discover_services()보다 먼저 호출해야 그 로그도 잡힌다
 
 FRAMEWORK_DIR = pathlib.Path(__file__).parent / "framework"
 

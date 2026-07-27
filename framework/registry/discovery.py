@@ -4,7 +4,10 @@ import importlib
 import pkgutil
 from types import ModuleType
 
+from framework.harness.logging_setup import get_logger
 from framework.registry.decorators import ServiceConsistencyError
+
+logger = get_logger("discovery")
 
 
 def discover_services(package: ModuleType) -> None:
@@ -14,17 +17,22 @@ def discover_services(package: ModuleType) -> None:
     않아도 되게 하는 대신, workflow.py가 없는 서비스 폴더는 여기서 바로 fail-fast한다 —
     조용히 무시되면 "서비스는 있는데 tool로는 안 잡히는" 상태가 되기 때문.
     """
+    logger.info("discovering services under %s", package.__name__)
     for _, name, is_pkg in pkgutil.iter_modules(package.__path__):
         if not is_pkg:
             continue
         module_name = f"{package.__name__}.{name}.workflow"
+        logger.debug("importing %s", module_name)
         try:
             importlib.import_module(module_name)
         except ModuleNotFoundError as exc:
             # exc.name으로 정확히 workflow.py 자체가 없는 경우만 골라낸다 — workflow.py는
             # 있지만 그 안에서 다른 모듈 import가 실패한 경우(진짜 버그)까지 오진하지 않기 위해.
             if exc.name == module_name:
+                logger.error("services/%s/ 에 workflow.py가 없다 (등록 트리거 모듈 누락)", name)
                 raise ServiceConsistencyError(
                     f"services/{name}/ 에 workflow.py가 없다 (등록 트리거 모듈 누락)"
                 ) from exc
             raise
+        else:
+            logger.info("registered service: %s", name)
