@@ -51,11 +51,9 @@ class StateMachine:
                 logger.info("state machine done: step='%s' (no next map)", current)
                 return context
 
-            next_step = spec.next.get(outcome)
-            if next_step is None:
-                logger.error("step '%s' produced unmapped outcome '%s'", current, outcome)
-                raise ValueError(f"step '{current}' produced unmapped outcome '{outcome}'")
-
+            # outcome이 spec.next의 키 밖이면 @workflow_step의 wrapper가 이미 그 자리에서
+            # ValueError를 던졌을 것이므로, 여기 도달했다면 outcome은 항상 유효한 키다.
+            next_step = spec.next[outcome]
             logger.info("step '%s' -> outcome=%r -> next='%s'", current, outcome, next_step)
 
             if next_step == TERMINAL:

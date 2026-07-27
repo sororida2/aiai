@@ -169,12 +169,21 @@ def workflow_step(
 
     def decorator(func: Callable) -> Callable:
         name = func.__name__
+
+        @functools.wraps(func)
+        def wrapper(*args: Any, **kwargs: Any) -> str:
+            outcome = func(*args, **kwargs)
+            if next is not None and outcome not in next:
+                logger.error("step '%s' returned outcome %r, not in declared next %s", name, outcome, list(next))
+                raise ValueError(f"step '{name}' returned outcome '{outcome}', not in declared next {list(next)}")
+            return outcome
+
         registry.register_workflow_step(
             name,
-            WorkflowStepSpec(order=order, source=source, next=next, max_retries=max_retries, func=func),
+            WorkflowStepSpec(order=order, source=source, next=next, max_retries=max_retries, func=wrapper),
         )
-        func.__step_name__ = name
-        return func
+        wrapper.__step_name__ = name
+        return wrapper
 
     return decorator
 

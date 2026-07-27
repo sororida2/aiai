@@ -20,6 +20,7 @@ prompt_store = PromptStore(base_dir=FRAMEWORK_PROMPTS_DIR)
     max_retries=5,
     next={
         "심사중": "fetch_status",  # 순환: 재조회
+        "접수완료": "DONE",
         "서류미비": "DONE",
         "승인완료": "DONE",
         "미확인": "manual_review",  # confidence != confirmed → 사람 판단으로

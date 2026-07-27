@@ -49,11 +49,22 @@ guides/legacy_adapter_guide.md ← 신규 서비스 추가 가이드
 ### `registry/decorators.py` — 등록 규약의 단일 지점
 전역 `registry = ToolRegistry()` 하나에 네 종류 스펙이 모인다.
 - `@tool(name, description)` → `ToolSpec` (오케스트레이터가 유일하게 커플링되는 표면)
-- `@workflow_step(order, next=..., max_retries=...)` → `WorkflowStepSpec` (결정론적 분기/순환을 `next` dict로 고정)
+- `@workflow_step(order, next=..., max_retries=...)` → `WorkflowStepSpec` (결정론적 분기/순환을 `next` dict로 고정) + 실행 시 반환값이 `next`의 키 밖이면 즉시 `ValueError` (`@judged`와 같은 방식의 즉시 검증)
 - `@judged(choices=...)` → `JudgedSpec` + 실행 시 `choices` 밖 값이면 즉시 `ValueError` (bounded 강제)
 - `@guardrail(input_schema=..., output_schema=...)` → `GuardrailSpec`
 
 모듈을 import하는 순간 데코레이터가 실행되며 등록된다. 예전에는 `main.py`에 서비스마다 `from services.<name> import workflow as _`를 나열해 이 import를 직접 트리거했지만, 지금은 `framework/registry/discovery.py`의 `discover_services()`가 `services/` 아래를 스캔해서 대신 트리거한다 (§ 아래 `registry/discovery.py` 절).
+
+**`@workflow_step` vs `@judged` — 헷갈리기 쉬운 지점.** 기준은 단 하나, "이 스텝의 결과값이 코드 로직으로 나오는가, 모델 호출로 나오는가"뿐이다.
+
+| | `@workflow_step` | `@judged` |
+|---|---|---|
+| 필수 여부 | 모든 스텝에 필수 — 없으면 state machine이 이 함수를 아예 모른다 | 선택 — "이 스텝은 모델이 결정한다"는 표시일 때만 추가로 얹는다 |
+| 하는 일 | `next={...}`로 다음 스텝(라우팅) 결정 | 반환값이 `choices` 밖이면 즉시 차단 (라우팅은 모름) |
+| 등록 위치 | `registry._workflow_steps` | `registry._judged` (별도) |
+| 왜 필요한가 | 파이프라인 그래프 자체를 코드로 고정하기 위해 | 모델 출력은 예측 불가능하므로 bounded 안전망이 필요해서 |
+
+코드가 직접 결정하는 스텝(`fetch_status`)은 `@workflow_step` 단독, 모델이 결정하는 스텝(`manual_review`)은 `@workflow_step` + `@judged` 이중으로 붙는다 — `@judged`가 라우팅을 대신하는 게 아니라, `@workflow_step`의 라우팅 계약 위에 "이 값은 모델이 만든 것"이라는 제약을 얹는 것뿐이다. `registry.validate()`가 "judged인데 workflow_step이 없는" 반쪽짜리 선언을 기동 시점에 바로 잡아내는 것도 이 관계(judged는 workflow_step에 종속) 때문이다.
 
 ### `registry/discovery.py` + `ToolRegistry.validate()` — auto-discovery와 일관성 검사
 `main.py`가 서비스를 일일이 알 필요가 없게 만드는 지점. Python은 모듈을 실제로 import하기 전까진 그 안의 데코레이터를 실행하지 않으므로, 등록이 일어나려면 누군가는 각 `services/<name>/workflow.py`를 import해야 한다 — `discover_services(services)`가 `pkgutil.iter_modules(services.__path__)`로 하위 패키지를 전부 찾아 그 `workflow.py`를 대신 import해준다.
@@ -98,6 +109,8 @@ guides/legacy_adapter_guide.md ← 신규 서비스 추가 가이드
 
 ### `workflow/state_machine.py` — 고정 파이프라인 실행기
 `StateMachine.run()`은 `entry`부터 시작해 `WorkflowStepSpec.func(context)`가 반환한 outcome 문자열을 `next` dict에서 찾아 다음 단계로 이동한다. `next_step == current`(자기 자신으로 순환)면 `retries` 카운터를 올리고 `max_retries` 초과 시 `MaxRetriesExceeded`. `next`가 없거나 `TERMINAL("DONE")`이면 종료. 판단(judged) 노드도 그냥 하나의 `workflow_step`으로 등록되며(`@judged` + `@workflow_step` 이중 데코레이터), state machine 입장에서는 outcome이 code-driven이든 model-driven이든 구분하지 않는다 — bounded choices라는 계약만 `@judged`가 보장한다. 각 스텝 실행을 `tracer.span(name=현재_step, kind="step")`으로 감싸고, 진입("state machine start")·전이("step 'X' -> outcome=... -> next='Y'")·종료를 `INFO`로 로깅한다.
+
+`outcome`이 `next`의 키 밖인지 확인하는 검증은 여기 없다 — `@workflow_step`의 wrapper(`registry/decorators.py`)가 함수 반환 즉시 검사해서 `ValueError`를 던지므로, `run()`이 `spec.next[outcome]`을 인덱싱하는 시점엔 `outcome`이 항상 유효한 키임이 보장된다(`@judged`가 `choices` 밖 값을 함수 반환 즉시 막는 것과 동일한 위치·방식). 이 즉시 검증 덕분에 `services/subscription_status/workflow.py`의 실제 버그(`mapping.json`의 `"10"→"접수완료"`가 `fetch_status`의 `next`에는 빠져 있던 것)를 테스트 중 바로 잡아낼 수 있었다.
 
 ### 서비스를 조합하는 서비스 — `services/subscription_weather_flow/workflow.py`
 `common/orchestrator.md`가 "하나의 요청이 여러 tool을 필요로 하면 ... 고정 서브 workflow(capability)로 등록되어 있는지 먼저 확인하라"고 지시하는 지점의 구현체. `Orchestrator.handle()`은 요청당 tool 하나만 고르므로(§`orchestrator.py`), 두 tool을 함께 써야 하는 요청은 에이전트가 즉석에서 두 번 호출하게 두지 않고 이렇게 **상위 capability 하나로 미리 고정**한다.
@@ -223,3 +236,4 @@ INFO  agent_loop.tracing           | trace 6c80695b end   [orchestrator] orchest
 - `OpenAIRunner`/`manual_review`는 `OPENAI_MODEL` 미지정 시 `gpt-4o-mini`로 기본 동작 — 실제 사용 가능한 모델명으로 `.env`에서 확정해야 함.
 - `main.py`의 `FirstMatchRunner`는 이름이 긴 tool부터 substring 매칭하도록 고쳤지만(한 tool 이름이 다른 tool 이름을 포함하는 경우 대비, 예: `weather` ⊂ `subscription_weather_flow`), 여전히 순수 문자열 포함 검사라 실제 자연어 요청 라우팅에는 쓸 수 없다 — 오프라인 샘플 테스트 전용 스텁이라는 원래 성격은 그대로.
 - `ToolRegistry.validate()`는 registry 내부 참조 무결성(step/judged/guardrail 연결)만 본다 — "adapter.py가 BaseAdapter를 상속했는가", "mapping.json이 실제로 존재하는가" 같은 파일 시스템/클래스 계층 검사나, "새 tool description이 기존 tool과 의미가 안 겹치는가" 같은 의미적 검사(`guides/legacy_adapter_guide.md` 체크리스트 항목)는 하지 않는다 — 이런 건 코드로 자동 판별하기 어려워 사람 리뷰 영역으로 남겨둠.
+- `@judged(choices=..., confidence_required="confirmed")`의 `confidence_required`는 `JudgedSpec`에 저장만 되고 실제로 어디서도 읽거나 검사하지 않는다 — "inferred 값은 judged 판단에 넘기면 안 된다"는 규칙은 지금 `fetch_status`가 `status_confidence != "confirmed"`를 직접 체크해서 우회 진입시키는 방식으로만 지켜지고, `@judged` 데코레이터 자체는 이 제약을 강제하지 않는 미완성 지점이다.
