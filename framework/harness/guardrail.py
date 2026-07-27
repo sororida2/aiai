@@ -4,9 +4,12 @@ from dataclasses import dataclass
 from typing import Any, Callable
 
 from framework.harness.logging_setup import get_logger
+from framework.harness.schema import OptionalField, SchemaViolation, optional, validate_schema
 from framework.registry.decorators import GuardrailSpec, ToolRegistry
 
 logger = get_logger("guardrail")
+
+__all__ = ["GuardrailChain", "GuardrailViolation", "OptionalField", "optional"]
 
 
 class GuardrailViolation(Exception):
@@ -21,19 +24,11 @@ def _validate(value: dict[str, Any], schema: dict[str, Any] | None, stage: str, 
     if schema is None:
         logger.debug("'%s' %s_schema not declared, skipping %s validation", tool_name, stage, stage)
         return
-    for key, expected_type in schema.items():
-        if key not in value:
-            logger.error("%s: '%s' guardrail failed — missing required field '%s'", stage, tool_name, key)
-            raise GuardrailViolation(stage, tool_name, f"missing required field '{key}'")
-        if expected_type is Any:
-            continue
-        if "choices" in expected_type if isinstance(expected_type, dict) else False:
-            if value[key] not in expected_type["choices"]:
-                logger.error(
-                    "%s: '%s' guardrail failed — '%s'=%r not in enum %s",
-                    stage, tool_name, key, value[key], expected_type["choices"],
-                )
-                raise GuardrailViolation(stage, tool_name, f"'{key}'={value[key]!r} not in enum {expected_type['choices']}")
+    try:
+        validate_schema(value, schema)
+    except SchemaViolation as e:
+        logger.error("%s: '%s' guardrail failed — %s", stage, tool_name, e.detail)
+        raise GuardrailViolation(stage, tool_name, e.detail) from e
     logger.debug("'%s' %s validated ok", tool_name, stage)
 
 

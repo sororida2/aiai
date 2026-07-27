@@ -4,8 +4,8 @@ from typing import Any
 
 from framework.registry.decorators import guardrail, registry, tool, workflow_step
 from framework.workflow.state_machine import StateMachine
-from services.subscription_status.workflow import subscription_status
-from services.weather.workflow import weather
+from services.subscription_status.workflow import SUBSCRIPTION_STATUS_OUTPUT_SCHEMA, subscription_status
+from services.weather.workflow import WEATHER_OUTPUT_SCHEMA, weather
 
 
 @workflow_step(order=1, next={"완료": "query_weather"})
@@ -33,7 +33,7 @@ def build_state_machine() -> StateMachine:
         "subscription_status 조회 결과의 region 값을 그대로 weather의 입력으로 사용한다."
     ),
 )
-@guardrail(output_schema={"subscription": Any, "weather": Any})
+@guardrail(output_schema={"subscription": SUBSCRIPTION_STATUS_OUTPUT_SCHEMA, "weather": WEATHER_OUTPUT_SCHEMA})
 def subscription_weather_flow(applicant_id: str) -> dict[str, Any]:
     context: dict[str, Any] = {"applicant_id": applicant_id}
     build_state_machine().run(context)

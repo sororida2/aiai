@@ -14,6 +14,22 @@ class MaxRetriesExceeded(Exception):
     pass
 
 
+class AwaitingHumanAction(Exception):
+    """human_action 노드가 아직 사람의 답을 못 받아 실행을 멈췄다는 신호.
+
+    에러가 아니라 "다음 턴에 답을 달라"는 정상적인 일시정지 신호다 — raise한
+    쪽(예: manual_review)은 step 이름을 몰라도 되도록 choices만 채워서 던지고,
+    StateMachine.run()이 잡아 step/context를 채운 뒤 다시 던진다. 이 예외가
+    바깥(Orchestrator)까지 그대로 전파되면 호출자가 "멈췄다"는 걸 구분해 처리한다.
+    """
+
+    def __init__(self, choices: tuple[str, ...]) -> None:
+        super().__init__(f"awaiting human action from {choices}")
+        self.choices = choices
+        self.step: str | None = None
+        self.context: dict[str, Any] | None = None
+
+
 TERMINAL = "DONE"
 
 
@@ -45,7 +61,13 @@ class StateMachine:
                 raise KeyError(f"unknown workflow step '{current}'")
 
             with tracer.span(name=current, kind="step"):
-                outcome = spec.func(context)
+                try:
+                    outcome = spec.func(context)
+                except AwaitingHumanAction as e:
+                    e.step = current
+                    e.context = context
+                    logger.info("state machine paused: step='%s' awaiting human action from %s", current, e.choices)
+                    raise
 
             if spec.next is None:
                 logger.info("state machine done: step='%s' (no next map)", current)

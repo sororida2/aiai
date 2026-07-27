@@ -6,6 +6,7 @@ from dataclasses import dataclass, field
 from typing import Any, Callable
 
 from framework.harness.logging_setup import get_logger
+from framework.harness.schema import SchemaViolation, validate_schema
 
 logger = get_logger("registry")
 
@@ -35,6 +36,13 @@ class JudgedSpec:
 
 
 @dataclass
+class HumanActionSpec:
+    choices: tuple[str, ...]
+    payload_schemas: dict[str, dict[str, Any]] | None
+    func: Callable
+
+
+@dataclass
 class GuardrailSpec:
     input_schema: dict[str, Any] | None
     output_schema: dict[str, Any] | None
@@ -56,6 +64,7 @@ class ToolRegistry:
         self._tools: dict[str, ToolSpec] = {}
         self._workflow_steps: dict[str, WorkflowStepSpec] = {}
         self._judged: dict[str, JudgedSpec] = {}
+        self._human_actions: dict[str, HumanActionSpec] = {}
         self._guardrails: dict[str, GuardrailSpec] = {}
 
     def register_tool(self, spec: ToolSpec) -> None:
@@ -68,6 +77,9 @@ class ToolRegistry:
 
     def register_judged(self, name: str, spec: JudgedSpec) -> None:
         self._judged[name] = spec
+
+    def register_human_action(self, name: str, spec: HumanActionSpec) -> None:
+        self._human_actions[name] = spec
 
     def register_guardrail(self, name: str, spec: GuardrailSpec) -> None:
         self._guardrails[name] = spec
@@ -84,6 +96,9 @@ class ToolRegistry:
     def judged_for(self, name: str) -> JudgedSpec | None:
         return self._judged.get(name)
 
+    def human_action_for(self, name: str) -> HumanActionSpec | None:
+        return self._human_actions.get(name)
+
     def validate(self) -> None:
         """등록된 스펙들 사이의 참조 무결성을 검사한다 (registry 내부 상태만으로 판단 가능한 것만).
 
@@ -92,8 +107,9 @@ class ToolRegistry:
         참조처럼 다른 모듈이 등록한 step을 가리키는 경우까지 정확히 검사할 수 있다.
         """
         logger.info(
-            "validating registry: tools=%d workflow_steps=%d judged=%d guardrails=%d",
-            len(self._tools), len(self._workflow_steps), len(self._judged), len(self._guardrails),
+            "validating registry: tools=%d workflow_steps=%d judged=%d human_actions=%d guardrails=%d",
+            len(self._tools), len(self._workflow_steps), len(self._judged),
+            len(self._human_actions), len(self._guardrails),
         )
         if not self._tools:
             logger.error("no tool registered")
@@ -119,6 +135,24 @@ class ToolRegistry:
                     f"judged node '{judged_name}'가 @workflow_step 없이 등록됐다 — "
                     "judged 노드는 반드시 @workflow_step과 함께 선언해야 state machine에 편입된다"
                 )
+
+        for action_name, action_spec in self._human_actions.items():
+            if action_name not in self._workflow_steps:
+                logger.error("human_action node '%s' registered without @workflow_step", action_name)
+                raise ServiceConsistencyError(
+                    f"human_action node '{action_name}'가 @workflow_step 없이 등록됐다 — "
+                    "human_action 노드는 반드시 @workflow_step과 함께 선언해야 state machine에 편입된다"
+                )
+            for action in action_spec.payload_schemas or {}:
+                if action not in action_spec.choices:
+                    logger.error(
+                        "human_action node '%s' has payload_schemas for action %r, not in declared choices %s",
+                        action_name, action, action_spec.choices,
+                    )
+                    raise ServiceConsistencyError(
+                        f"human_action node '{action_name}'의 payload_schemas 키 '{action}'가 "
+                        f"choices {action_spec.choices} 안에 없다 (오탈자 의심)"
+                    )
 
         for tool_name, guardrail_spec in self._guardrails.items():
             tool_spec = self._tools.get(tool_name)
@@ -207,6 +241,52 @@ def judged(choices: tuple[str, ...], *, confidence_required: str = "confirmed") 
             return result
 
         wrapper.__judged_name__ = name
+        return wrapper
+
+    return decorator
+
+
+def human_action(
+    choices: tuple[str, ...], *, payload_schemas: dict[str, dict[str, Any]] | None = None
+) -> Callable:
+    """`@judged`와 계약(bounded choices)은 같지만 판단 주체가 모델이 아니라 사람이다.
+
+    함수는 사람의 답이 아직 없으면 `framework.workflow.state_machine.AwaitingHumanAction`을
+    던져 실행을 멈추고, 답이 있으면 `{"action": <choices 중 하나>, ...payload}` 형태의
+    dict를 반환해야 한다. action별로 다른 payload 구조가 필요하면(예: "서류추가요청"은
+    어떤 서류가 더 필요한지 담아야 함) `payload_schemas`에 action별 스키마를 선언한다 —
+    action 종류 자체는 여전히 유한 집합(bounded)이고, 그 안의 세부 데이터만 자유롭게
+    구조화된다는 원칙(자유 라우팅과 구분되는 judged branch의 핵심)은 그대로 유지된다.
+    """
+
+    def decorator(func: Callable) -> Callable:
+        name = func.__name__
+        registry.register_human_action(
+            name, HumanActionSpec(choices=choices, payload_schemas=payload_schemas, func=func)
+        )
+
+        @functools.wraps(func)
+        def wrapper(*args: Any, **kwargs: Any) -> str:
+            result = func(*args, **kwargs)
+            action = result.get("action") if isinstance(result, dict) else result
+            if action not in choices:
+                logger.error("human_action '%s' returned action %r, not in bounded choices %s", name, action, choices)
+                raise ValueError(f"human_action '{name}' returned action {action!r}, not in bounded choices {choices}")
+
+            schema = (payload_schemas or {}).get(action)
+            if schema is not None:
+                try:
+                    validate_schema(result, schema)
+                except SchemaViolation as e:
+                    logger.error("human_action '%s' payload invalid for action %r: %s", name, action, e.detail)
+                    raise ValueError(
+                        f"human_action '{name}' payload invalid for action {action!r}: {e.detail}"
+                    ) from e
+
+            logger.info("human_action '%s' -> %r", name, action)
+            return action
+
+        wrapper.__human_action_name__ = name
         return wrapper
 
     return decorator

@@ -1,17 +1,11 @@
 from __future__ import annotations
 
-import pathlib
 from typing import Any
 
-from framework.llm.openai_client import complete
-from framework.prompts.store import PromptStore
-from framework.registry.decorators import guardrail, judged, registry, tool, workflow_step
-from framework.workflow.state_machine import StateMachine
+from framework.harness.guardrail import optional
+from framework.registry.decorators import guardrail, human_action, registry, tool, workflow_step
+from framework.workflow.state_machine import AwaitingHumanAction, StateMachine
 from services.subscription_status.adapter import SubscriptionStatusAdapter
-
-PROMPTS_DIR = pathlib.Path(__file__).parent / "prompts"
-FRAMEWORK_PROMPTS_DIR = pathlib.Path(__file__).resolve().parents[2] / "framework" / "prompts"
-prompt_store = PromptStore(base_dir=FRAMEWORK_PROMPTS_DIR)
 
 
 @workflow_step(
@@ -35,20 +29,35 @@ def fetch_status(context: dict[str, Any]) -> str:
     return result["status"]
 
 
-@workflow_step(order=2, next={"자동승인": "DONE", "수동검토": "DONE"})
-@judged(choices=("자동승인", "수동검토"))
-def manual_review(context: dict[str, Any]) -> str:
-    prompt = prompt_store.compose("manual_review", PROMPTS_DIR)
-    user = (
-        f"신청자 ID: {context['applicant_id']}\n"
-        f"레거시 조회 결과: {context['last_result']}\n\n"
-        "위 정보를 바탕으로 '자동승인' 또는 '수동검토' 중 하나만 정확히 출력하라."
-    )
-    return complete(system=prompt, user=user)
+@workflow_step(order=2, next={"자동승인": "DONE", "수동검토": "DONE", "서류추가요청": "DONE"})
+@human_action(
+    choices=("자동승인", "수동검토", "서류추가요청"),
+    payload_schemas={"서류추가요청": {"field": Any}},
+)
+def manual_review(context: dict[str, Any]) -> dict[str, Any]:
+    human_action_input = context.get("human_action")
+    if human_action_input is None:
+        # 사람의 답이 아직 없다 — StateMachine.run()이 이 예외를 잡아 실행을 멈추고
+        # choices를 그대로 호출자에게 돌려준다(에러가 아니라 대기 신호).
+        raise AwaitingHumanAction(choices=("자동승인", "수동검토", "서류추가요청"))
+    context["last_result"]["manual_review_decision"] = human_action_input
+    return human_action_input
 
 
 def build_state_machine() -> StateMachine:
     return StateMachine(registry=registry, entry="fetch_status")
+
+
+SUBSCRIPTION_STATUS_OUTPUT_SCHEMA = {
+    "applicant_id": Any,
+    "status": {"choices": ["접수완료", "서류미비", "심사중", "승인완료", "보류"]},
+    "status_confidence": {"choices": ["confirmed", "inferred"]},
+    "region": Any,
+    # human_action이 action+payload를 이미 bounded choices/payload_schemas로 검증했으므로
+    # 여기서는 존재 여부만 확인한다 — action마다 payload 모양이 달라 discriminated union을
+    # guardrail 스키마 문법 하나로 표현할 수 없다.
+    "manual_review_decision": optional(Any),
+}
 
 
 @tool(
@@ -58,14 +67,7 @@ def build_state_machine() -> StateMachine:
         "수동검토까지 이어지는 고정 서브 workflow 전체를 하나의 capability로 실행한다."
     ),
 )
-@guardrail(
-    output_schema={
-        "applicant_id": Any,
-        "status": {"choices": ["접수완료", "서류미비", "심사중", "승인완료", "보류"]},
-        "status_confidence": {"choices": ["confirmed", "inferred"]},
-        "region": Any,
-    }
-)
+@guardrail(output_schema=SUBSCRIPTION_STATUS_OUTPUT_SCHEMA)
 def subscription_status(applicant_id: str) -> dict[str, Any]:
     context: dict[str, Any] = {"applicant_id": applicant_id, "adapter": SubscriptionStatusAdapter()}
     build_state_machine().run(context)
