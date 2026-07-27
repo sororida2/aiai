@@ -43,7 +43,7 @@ Triage Agent가 Tool 스키마를 참조해 판단하고, 단일 tool을 직접 
 
 ### Tool Registry — 양면 어댑터
 
-새 서비스 추가 = 새 tool 파일 + 새 prompt 파일이며, 오케스트레이터 코드를 건드리지 않는 것이 목표다. 각 tool 어댑터는 두 개의 이질적인 면을 가진다.
+새 서비스 추가 = 새 tool 파일 + 새 prompt 파일이며, 오케스트레이터 코드를 건드리지 않는 것이 목표다 — 구현체에서는 여기서 한 걸음 더 나가 `main.py`(조립 지점)조차 건드리지 않는다. 서비스 모듈은 `services/` 아래를 스캔하는 auto-discovery가 자동으로 찾아 등록하고, 등록 직후 참조 무결성(오탈자, 데코레이터 누락 등)까지 기동 시점에 검사한다. 자세한 구현은 `ARCHITECTURE.md`의 `registry/discovery.py` 절 참고. 각 tool 어댑터는 두 개의 이질적인 면을 가진다.
 
 - **의미론적 면**: 스키마·설명·파라미터. 오케스트레이터가 유일하게 커플링되는 지점이며, 설계에 의해 결정되는 영역이다.
 - **프로토콜적 면**: 실제 호출·인증·응답 정규화, 그리고 semantic 매핑 테이블. 레거시의 실제 스펙이라는 사실(fact)에 종속되는 영역이다.
@@ -89,12 +89,17 @@ Claude connector 등이 쓰는 MCP(Model Context Protocol)는 지금까지 설�
 - MCP를 쓰든 자체 데코레이터 방식을 쓰든 semantic normalization(매핑 조사, confirmed/inferred 관리)은 프로토콜과 무관한 고정 비용이다. 프로토콜 선택은 "어댑터를 담는 그릇"만 정할 뿐, 안에 채워야 하는 도메인 지식 작업량은 줄여주지 않는다.
 - 배포 토폴로지는 세 가지: 레거시 1개당 서버 1개(1:1), 여러 레거시를 게이트웨이 서버 하나가 aggregate(N:1), 혹은 애초에 MCP 없이 같은 프로세스 내 함수 호출(오케스트레이터·tool이 같은 OpenAI Agents SDK 서비스 안에 있을 때). 다른 애플리케이션/팀/외부 AI 클라이언트가 같은 어댑터를 재사용해야 할 때만 MCP 채택이 정당화된다. 지금 규모(단일 서비스, 레거시 소수)에서는 자체 데코레이터 방식이 더 가볍고, tool 스키마만 MCP와 유사하게 맞춰두면 향후 전환 비용을 낮출 수 있다.
 
-## 우선순위 제안
+## 우선순위 제안 (진행 상황)
 
-1. 첫 번째 케이스(청약진행상황)로 어댑터 인터페이스(함수 시그니처, 에러 포맷, 상태 정규화 규칙)를 확정
-2. 이를 "레거시 어댑터 작성 가이드"로 문서화 — 참고모델의 핵심 산출물
-3. 이후 레거시들은 신규 개발자가 가이드만 보고 어댑터를 작성
+1. ~~첫 번째 케이스(청약진행상황)로 어댑터 인터페이스(함수 시그니처, 에러 포맷, 상태 정규화 규칙)를 확정~~ — 완료. `services/subscription_status/`
+2. ~~이를 "레거시 어댑터 작성 가이드"로 문서화~~ — 완료. `guides/legacy_adapter_guide.md`
+3. 이후 레거시들은 신규 개발자가 가이드만 보고 어댑터를 작성 — `services/weather/`(외부 실 API, Open-Meteo)로 가이드가 실제로 통하는지 검증. `services/subscription_weather_flow/`로 "서비스가 서비스를 조합"하는 세 번째 패턴(가이드에 아직 없던 유형)까지 추가로 확인
+
+**가이드 문서화 이후 추가로 구현된 것** (원래 5가지 과제 중 나머지를 실제 동작으로 검증):
+- `manual_review` judged 노드와 오케스트레이터 라우팅(`OpenAIRunner`)에 실제 OpenAI 호출 연결 — `framework/llm/openai_client.py`
+- `services/` auto-discovery + 기동 시점 일관성 검사 (`registry.validate()`) — "3. Agent 내 신규 서비스 추가 시 병렬로 독립적 추가가 가능한 구조" 과제를 오케스트레이터뿐 아니라 조립 지점(`main.py`)까지 무손대기로 달성
+- 구체적 구현·검증 내역, 남은 한계는 `ARCHITECTURE.md` 참고 (as-built 문서, 이 문서보다 최신 상태 유지)
 
 ---
 관련 다이어그램: `agent_loop_architecture_diagrams.html`
-관련 문서: `ai_framework.md` (설계 철학 — 위임의 조건, 결정론/판단 경계, annotation 패턴)
+관련 문서: `ai_framework_2.md` (설계 철학 — 위임의 조건, 결정론/판단 경계, annotation 패턴), `ARCHITECTURE.md` (as-built 코드 구성 — 이 논의가 실제로 어떻게 구현됐는지)

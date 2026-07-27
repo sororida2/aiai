@@ -1,0 +1,33 @@
+{
+  "_comment": "WMO Weather interpretation code (Open-Meteo current_weather.weathercode) 공식 문서화 표. 전부 confirmed — 표에 없는 코드가 오면 SemanticMapping이 UnmappedValueError로 fail-fast한다.",
+  "mappings": {
+    "0": {"value": "맑음", "confidence": "confirmed"},
+    "1": {"value": "대체로 맑음", "confidence": "confirmed"},
+    "2": {"value": "부분적으로 흐림", "confidence": "confirmed"},
+    "3": {"value": "흐림", "confidence": "confirmed"},
+    "45": {"value": "안개", "confidence": "confirmed"},
+    "48": {"value": "서리 안개", "confidence": "confirmed"},
+    "51": {"value": "약한 이슬비", "confidence": "confirmed"},
+    "53": {"value": "보통 이슬비", "confidence": "confirmed"},
+    "55": {"value": "강한 이슬비", "confidence": "confirmed"},
+    "56": {"value": "약한 착빙성 이슬비", "confidence": "confirmed"},
+    "57": {"value": "강한 착빙성 이슬비", "confidence": "confirmed"},
+    "61": {"value": "약한 비", "confidence": "confirmed"},
+    "63": {"value": "보통 비", "confidence": "confirmed"},
+    "65": {"value": "강한 비", "confidence": "confirmed"},
+    "66": {"value": "약한 착빙성 비", "confidence": "confirmed"},
+    "67": {"value": "강한 착빙성 비", "confidence": "confirmed"},
+    "71": {"value": "약한 눈", "confidence": "confirmed"},
+    "73": {"value": "보통 눈", "confidence": "confirmed"},
+    "75": {"value": "강한 눈", "confidence": "confirmed"},
+    "77": {"value": "싸락눈", "confidence": "confirmed"},
+    "80": {"value": "약한 소나기", "confidence": "confirmed"},
+    "81": {"value": "보통 소나기", "confidence": "confirmed"},
+    "82": {"value": "강한 소나기", "confidence": "confirmed"},
+    "85": {"value": "약한 눈 소나기", "confidence": "confirmed"},
+    "86": {"value": "강한 눈 소나기", "confidence": "confirmed"},
+    "95": {"value": "뇌우", "confidence": "confirmed"},
+    "96": {"value": "약한 우박을 동반한 뇌우", "confidence": "confirmed"},
+    "99": {"value": "강한 우박을 동반한 뇌우", "confidence": "confirmed"}
+  }
+}

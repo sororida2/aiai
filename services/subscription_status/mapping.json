@@ -1,0 +1,9 @@
+{
+  "mappings": {
+    "10": {"value": "접수완료", "confidence": "confirmed"},
+    "20": {"value": "서류미비", "confidence": "confirmed"},
+    "30": {"value": "심사중", "confidence": "confirmed"},
+    "40": {"value": "승인완료", "confidence": "confirmed"},
+    "99": {"value": "보류", "confidence": "inferred"}
+  }
+}
