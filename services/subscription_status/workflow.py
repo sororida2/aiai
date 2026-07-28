@@ -29,9 +29,16 @@ def fetch_status(context: dict[str, Any]) -> str:
     return result["status"]
 
 
-@workflow_step(order=2, next={"자동승인": "DONE", "수동검토": "DONE", "서류추가요청": "DONE"})
+MANUAL_REVIEW_CHOICES = ("승인", "반려", "서류추가요청")
+# 예전 @judged 시절엔 "자동승인"/"수동검토" 이분법이었다 — AI가 "사람한테 넘길지 말지"를
+# 판단했으므로 그 이름이 맞았다. 지금은 이 노드 자체가 이미 사람이 보고 있는 지점이라
+# "자동승인"(모순: 사람이 고르는데 자동?)/"수동검토"(모순: 이미 수동검토 중인데 수동검토로?)가
+# 더 이상 말이 안 된다 — 사람이 실제로 내리는 결정(승인/반려)으로 바꿨다.
+
+
+@workflow_step(order=2, next={"승인": "DONE", "반려": "DONE", "서류추가요청": "DONE"})
 @human_action(
-    choices=("자동승인", "수동검토", "서류추가요청"),
+    choices=MANUAL_REVIEW_CHOICES,
     payload_schemas={"서류추가요청": {"field": Any}},
 )
 def manual_review(context: dict[str, Any]) -> dict[str, Any]:
@@ -39,7 +46,7 @@ def manual_review(context: dict[str, Any]) -> dict[str, Any]:
     if human_action_input is None:
         # 사람의 답이 아직 없다 — StateMachine.run()이 이 예외를 잡아 실행을 멈추고
         # choices를 그대로 호출자에게 돌려준다(에러가 아니라 대기 신호).
-        raise AwaitingHumanAction(choices=("자동승인", "수동검토", "서류추가요청"))
+        raise AwaitingHumanAction(choices=MANUAL_REVIEW_CHOICES)
     context["last_result"]["manual_review_decision"] = human_action_input
     return human_action_input
 

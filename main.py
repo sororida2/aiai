@@ -76,3 +76,4 @@ if __name__ == "__main__":
     print(orchestrator.handle("subscription_status 조회해줘", applicant_id="A123"))
     print(orchestrator.handle("weather 조회해줘", location="Seoul"))
     print(orchestrator.handle("subscription_weather_flow 조회해줘", applicant_id="A123"))
+    print(orchestrator.handle("applicant_list 보여줘")["table"])

@@ -1,6 +1,6 @@
 # Agent Loop 프레임워크 — 코드 구성
 
-`README.md`(왜 이 구조가 필요한가)와 `ai_framework_2.md`(설계 철학)의 논의가 실제로 어떤 파일·클래스로 구현됐는지 매핑한 문서다. `services/` 아래 세 서비스가 각기 다른 절의 살아있는 예시다 — `subscription_status`(레거시 어댑터 + human-in-the-loop 판단 노드), `weather`(인증 없는 외부 실 API 어댑터), `subscription_weather_flow`(서비스를 조합하는 서비스). `main.py`가 실행 진입점이고, `examples/human_action_demo.py`가 human-in-the-loop 일시정지/재개를 터미널에서 직접 확인해보는 실행 가능한 예시다.
+`README.md`(왜 이 구조가 필요한가)와 `ai_framework_2.md`(설계 철학)의 논의가 실제로 어떤 파일·클래스로 구현됐는지 매핑한 문서다. `services/` 아래 네 서비스가 각기 다른 절의 살아있는 예시다 — `subscription_status`(레거시 어댑터 + human-in-the-loop 판단 노드), `weather`(인증 없는 외부 실 API 어댑터), `subscription_weather_flow`(서비스를 조합하는 서비스), `applicant_list`(입력 없는 목록 조회 + 표 형식 렌더링). `main.py`가 실행 진입점이고, `examples/human_action_demo.py`가 human-in-the-loop 일시정지/재개를 터미널에서 직접 확인해보는 실행 가능한 예시다.
 
 ## 디렉토리 구조
 
@@ -34,10 +34,16 @@ services/                   ← 설정. 새 서비스 추가 시 여기만 늘�
 │   ├── mapping.json          ← WMO weather code(공식 문서화 표) → 한국어 정규화 테이블
 │   ├── workflow.py           ← 단일 스텝 파이프라인(fetch_weather) + 최상위 @tool
 │   └── prompts/weather.md    ← 이 tool 전용 프롬프트
-└── subscription_weather_flow/← 세 번째 예시: 어댑터 서비스가 아니라 "서비스를 조합하는 서비스"
-    ├── workflow.py           ← adapter.py/mapping.json 없음 — subscription_status()/weather() tool 함수를
-    │                            그대로 호출해 조합하는 @workflow_step 2단계 + 최상위 @tool
-    └── prompts/subscription_weather_flow.md
+├── subscription_weather_flow/← 세 번째 예시: 어댑터 서비스가 아니라 "서비스를 조합하는 서비스"
+│   ├── workflow.py           ← adapter.py/mapping.json 없음 — subscription_status()/weather() tool 함수를
+│   │                            그대로 호출해 조합하는 @workflow_step 2단계 + 최상위 @tool
+│   └── prompts/subscription_weather_flow.md
+└── applicant_list/            ← 네 번째 예시: 입력 없는 tool + 표 형식 렌더링
+    ├── adapter.py           ← ApplicantListAdapter(BaseAdapter), 20명 스텁 목록 + subscription_status와
+    │                            같은 5단계 상태 체계(별도 mapping.json, 값은 동일)로 정규화
+    ├── mapping.json
+    ├── workflow.py           ← 단일 스텝(fetch_applicants) + 최상위 @tool이 마크다운 표(`table`)까지 조립
+    └── prompts/applicant_list.md
 
 main.py                     ← 조립 지점 (discover_services + registry.validate(), build_orchestrator,
                                 OpenAIRunner/FirstMatchRunner) + 실행 예시. 서비스 추가 시 더 이상 손대지 않아도 됨.
@@ -114,7 +120,7 @@ guides/legacy_adapter_guide.md ← 신규 서비스 추가 가이드
 `span()`은 활성 trace가 없는 상태(예: 오케스트레이터를 거치지 않고 `weather(location=...)`처럼 tool 함수를 직접 호출·테스트하는 경우)에도 안전하게 동작한다 — 스택이 비어 있으면 이름 없는 암묵적 루트를 하나 열어서 쓰고, 빠져나갈 때 다시 비운다. `StateMachine.run()`이 항상 `span()`을 쓰게 되면서 이 케이스를 처음부터 고려해야 했다.
 
 ### `prompts/store.py` — 프롬프트 계층
-`common_prompt()` (공통) + `tool_prompt()` (도메인별, `services/<name>/prompts/<tool_name>.md`) + 선택적 few-shot을 `compose()`가 `---`로 이어붙인다. 오케스트레이터는 `common_prompt()`만 써서 `OpenAIRunner.choose_tool()`에 넘긴다. `compose()` + `framework.llm.openai_client.complete()` 조합(도메인별 judged 노드가 실제로 모델을 호출하는 배선)은 원래 `manual_review`가 살아있는 예시였는데, `manual_review`가 사람 판단(`@human_action`)으로 바뀌면서 지금은 이 조합을 실제로 쓰는 서비스가 없다 — § 아래 "현재 스캐폴드의 한계" 참고. `complete()` 자체는 모델/프롬프트 길이·응답 미리보기를 `INFO`로, system/user 프롬프트 원문 전체를 `DEBUG`로 로깅한다 — 프롬프트에 개인정보가 실릴 수 있는 서비스라면 운영 환경에서 `LOG_LEVEL=DEBUG`를 켜지 않도록 주의.
+`common_prompt()` (공통) + `tool_prompt()` (도메인별, `services/<name>/prompts/<tool_name>.md`) + 선택적 few-shot을 `compose()`가 `---`로 이어붙인다. 오케스트레이터는 `common_prompt()`만 써서 `OpenAIRunner.choose_tool()`에 넘긴다. `compose()` + `framework.llm.openai_client.complete()` 조합(도메인별 judged 노드가 실제로 모델을 호출하는 배선)은 원래 `manual_review`가 살아있는 예시였는데, `manual_review`가 사람 판단(`@human_action`)으로 바뀌면서 지금은 이 조합을 실제로 쓰는 서비스가 없다 — 당시 전용이던 `services/subscription_status/prompts/manual_review.md`는 완전히 죽은 파일이라 삭제했고, `compose()`/`complete()` 자체는 재사용 가능한 프레임워크 능력이라 남겨뒀다 (§ 아래 "현재 스캐폴드의 한계" 참고). `complete()` 자체는 모델/프롬프트 길이·응답 미리보기를 `INFO`로, system/user 프롬프트 원문 전체를 `DEBUG`로 로깅한다 — 프롬프트에 개인정보가 실릴 수 있는 서비스라면 운영 환경에서 `LOG_LEVEL=DEBUG`를 켜지 않도록 주의.
 
 ### `semantic/mapping.py` — 레거시 의미 정규화
 `SemanticMapping.normalize(raw_value)`가 `mapping.json`을 찾아 `MappedValue(raw, value, confidence)`를 반환. 매핑에 없으면 `UnmappedValueError`로 즉시 실패 (fail-fast). `MappedValue.require_confirmed()`는 `confidence != "confirmed"`면 예외를 던져, `inferred` 값이 판단 분기에 잘못 쓰이는 걸 타입 수준에서 막는다.
@@ -138,25 +144,30 @@ guides/legacy_adapter_guide.md ← 신규 서비스 추가 가이드
 
 `manual_review`의 실제 배선(`services/subscription_status/workflow.py`):
 ```python
-@workflow_step(order=2, next={"자동승인": "DONE", "수동검토": "DONE", "서류추가요청": "DONE"})
+MANUAL_REVIEW_CHOICES = ("승인", "반려", "서류추가요청")
+
+
+@workflow_step(order=2, next={"승인": "DONE", "반려": "DONE", "서류추가요청": "DONE"})
 @human_action(
-    choices=("자동승인", "수동검토", "서류추가요청"),
+    choices=MANUAL_REVIEW_CHOICES,
     payload_schemas={"서류추가요청": {"field": Any}},
 )
 def manual_review(context: dict[str, Any]) -> dict[str, Any]:
     human_action_input = context.get("human_action")
     if human_action_input is None:
-        raise AwaitingHumanAction(choices=("자동승인", "수동검토", "서류추가요청"))
+        raise AwaitingHumanAction(choices=MANUAL_REVIEW_CHOICES)
     context["last_result"]["manual_review_decision"] = human_action_input
     return human_action_input
 ```
 전에는 이 지점에서 OpenAI에게 "자동승인/수동검토 중 뭘 고를지"를 대신 판단시켰다(`@judged` + `complete()`). "manual_review"라는 이름 자체가 "사람이 검토해야 하는 케이스"라는 뜻인데 정작 모델이 그 판단을 대신하고 있었던 게 원래의 모순이었고, 지금은 이름 그대로 실제 사람의 답을 기다린다.
 
+choices 이름도 그 흔적을 정리했다 — "자동승인"(모순: 사람이 고르는데 "자동"?)/"수동검토"(모순: 이미 `manual_review` 안인데 또 "수동검토"로?)는 AI가 "사람에게 넘길지 말지"를 판단하던 시절의 이분법이 그대로 남은 것이었다. 지금은 이 노드 자체가 사람이 보고 있는 지점이므로, 사람이 실제로 내리는 결정(승인/반려)으로 바꿨다.
+
 **실행 가능한 예시 — `examples/human_action_demo.py`.** 위 배선이 실제로 pause → 사람 입력 → resume까지 도는 걸 터미널에서 직접 확인할 수 있다. `main.py`의 `build_orchestrator()`를 그대로 재사용하고, 레거시 어댑터가 아직 스텁이라(`SubscriptionStatusAdapter.call()`이 항상 confirmed 응답만 반환) `manual_review`까지 못 가는 문제는 이 스크립트 안에서만 어댑터를 몽키패치해 `status_code="99"`(inferred)를 강제하는 방식으로 우회한다 — 실제 레거시 연동이 붙으면 이 몽키패치는 필요 없다. 흐름:
 ```
 $ python examples/human_action_demo.py
 [사람 확인 필요] tool=subscription_status step=manual_review
-가능한 action: 자동승인, 수동검토, 서류추가요청
+가능한 action: 승인, 반려, 서류추가요청
 고를 action을 입력하세요: 서류추가요청
 어떤 서류가 더 필요한가요?: 소득증빙서류
 
@@ -174,6 +185,14 @@ bounded choices 밖의 값을 입력하면(`@human_action`이 던지는 `ValueEr
 - `query_subscription` → `query_weather` 두 `@workflow_step`이 `next`로 고정 연결되며, `query_subscription`이 채운 `subscription_result["region"]`을 `query_weather`가 그대로 `weather(location=...)`의 입력으로 넘긴다 — 이게 두 서비스 사이의 실제 데이터 의존관계다.
 - 내부에서 `subscription_status()`/`weather()`를 직접 호출하는 건 그 두 tool 각각의 `GuardrailChain.run()`(input 검증 포함)을 거치지 않는다는 뜻이다 — `subscription_status.workflow`가 내부적으로 `SubscriptionStatusAdapter`를 직접 호출하고 오케스트레이터의 개입 없이 결과를 합성하는 것과 동일한 "capability가 capability를 감싼다" 패턴이다.
 - 다만 output 쪽 **내용물 검증**은 우회되지 않는다. `subscription_weather_flow`의 guardrail은 `{"subscription": Any, "weather": Any}`처럼 존재 여부만 보는 대신, 각 서비스의 `workflow.py`가 노출하는 `SUBSCRIPTION_STATUS_OUTPUT_SCHEMA` / `WEATHER_OUTPUT_SCHEMA` 상수를 그대로 import해 `{"subscription": SUBSCRIPTION_STATUS_OUTPUT_SCHEMA, "weather": WEATHER_OUTPUT_SCHEMA}`로 중첩 선언한다(§ `harness/guardrail.py`의 중첩 스키마 검증). `_validate()`가 재귀적으로 내려가 `subscription.status`/`weather.condition` 같은 중첩 필드까지 enum·optional 규칙을 그대로 적용하므로, 조합 서비스를 오케스트레이터로 호출하는 경로에서는 결과적으로 내용 검증이 이뤄진다. 스키마를 두 tool 모듈에서 재사용하기 때문에 중복 선언 없이 단일 소스로 유지된다.
+
+### 입력 없는 목록 조회 + 표 렌더링 — `services/applicant_list/workflow.py`
+청약 신청자 20명(스텁)과 각자의 진행 단계를 한 번에 보여주는 tool. 구조적으로는 `weather`와 같은 "단순 어댑터 서비스"(`adapter.py`/`mapping.json`/단일 스텝)이지만 두 가지가 다르다.
+
+- **입력이 없다.** `@tool` 함수가 `applicant_list()`로 파라미터 0개 — `_infer_schema()`(`registry/decorators.py`)가 빈 `input_schema`를 추론하는 첫 사례다. 목록 전체를 고정 조회하는 tool은 라우팅에 필요한 인자가 없어도 된다는 걸 보여준다.
+- **`mapping.json`을 `subscription_status`와 공유하지 않고 따로 둔다.** 두 서비스가 같은 레거시 청약 시스템의 다른 API(목록 vs 상세)를 표현한다는 설정이라 값(코드→상태 5종)은 우연히 동일하지만, "서비스는 자기 매핑 자산을 스스로 갖는다"는 원칙(§ 신규 서비스 추가 가이드)을 그대로 따른다 — import로 공유하면 결합이 생기고, 두 API가 실제로는 다른 속도로 바뀔 수 있는 별개의 레거시 엔드포인트라는 전제와 맞지 않는다.
+- **최상위 `@tool` 함수가 표현(presentation)까지 조립한다.** `adapter.normalize()`는 의미 정규화(코드→값+confidence)까지만 하고, `applicant_list()`가 그 위에서 `_render_table()`로 마크다운 표 문자열을 만들어 `{"applicants": [...], "table": "..."}`로 반환한다 — 구조화된 데이터와 표 문자열을 같이 주는 이유는, 채팅 인터페이스에 그대로 얹었을 때 20행짜리 표가 실제로 읽을 만한지(이번 서비스를 추가한 실험 목적)를 그 자리에서 확인할 수 있게 하기 위해서다.
+- **"목록 → 상세" 두 단계는 하나의 capability로 묶지 않았다.** `subscription_weather_flow`(region 데이터를 다음 tool 입력으로 자동 전달)와 달리, `applicant_list`의 tool description은 "사용자가 특정 신청자를 지목하면 `subscription_status(applicant_id=...)`로 이어서 조회하라"고만 안내하고 실제 연결은 만들지 않았다 — 두 호출이 같은 요청 안에서 항상 함께 일어나는 게 아니라(목록만 보고 끝낼 수도 있음), 별개의 대화 턴에서 사용자가 고른 이름을 사람(또는 그 위의 agent 판단)이 applicant_id로 옮겨서 다음 요청을 만드는 구조이기 때문이다 — 이게 **고정 서브 workflow로 묶어야 하는 경우(subscription_weather_flow)와 개별 tool로 남겨야 하는 경우(applicant_list → subscription_status)를 가르는 기준**이다: 데이터 의존관계가 매 호출마다 결정론적으로 이어지면 묶고, 사람이 매번 다르게 골라야 하면 개별 tool로 남긴다.
 
 ## 요청 하나의 전체 흐름 (`main.py` 예시 기준)
 
@@ -201,12 +220,12 @@ orchestrator.handle("subscription_status 조회해줘", applicant_id="A123")
 ```
 StateMachine.run() 계속 (entry 이후 manual_review 진입)
   └─ manual_review(context) 호출 — context에 아직 "human_action" 없음
-       └─ raise AwaitingHumanAction(choices=("자동승인","수동검토","서류추가요청"))
+       └─ raise AwaitingHumanAction(choices=("승인","반려","서류추가요청"))
             → StateMachine.run()이 잡아 step="manual_review", context=현재 context를 채워 다시 던짐
        → guardrails.run()이 output 검증 없이 그대로 전파 (완료된 결과가 아니므로)
        → Orchestrator.handle()이 받아서 정상 반환값으로 변환:
             {"status": "awaiting_human_action", "tool": "subscription_status",
-             "step": "manual_review", "choices": ["자동승인","수동검토","서류추가요청"], "context": {...}}
+             "step": "manual_review", "choices": ["승인","반려","서류추가요청"], "context": {...}}
   ⋯ (사람이 다음 턴에 답을 고름: 예 {"action": "서류추가요청", "field": "소득증빙서류"}) ⋯
 orchestrator.resume("subscription_status", context, "manual_review", {"action": "서류추가요청", "field": "소득증빙서류"})
   └─ context["human_action"] = {"action": "서류추가요청", "field": "소득증빙서류"}
@@ -294,12 +313,13 @@ INFO  agent_loop.tracing           | trace 6c80695b end   [orchestrator] orchest
 | 서비스 auto-discovery + 기동 시점 일관성 검사 | `registry.discovery.discover_services()` + `registry.decorators.ToolRegistry.validate()` |
 | Optional 필드 + 중첩 스키마 검증 (조합 서비스의 하위 tool 결과까지 boundary에서 검증) | `harness.schema.optional()`(`OptionalField`) + `validate_schema()`의 재귀 검증 — `harness.guardrail`과 `registry.decorators.human_action`이 공유, `services/subscription_weather_flow/workflow.py`가 `SUBSCRIPTION_STATUS_OUTPUT_SCHEMA`/`WEATHER_OUTPUT_SCHEMA`를 재사용 |
 | 레벨 조절 가능한 단계별 로깅 | `harness.logging_setup.configure_logging()`(`LOG_LEVEL`) + `harness.tracing.Tracer`(trace/span을 로그로도 출력) |
+| 입력 없는 tool + 결정론적 데이터 의존관계가 없어 별도 tool로 남긴 "목록 → 상세" 패턴 | `services/applicant_list/workflow.py`의 최상위 `@tool applicant_list()` — 표(`table`) 렌더링까지 조립, `subscription_status`로의 후속 조회는 프롬프트로만 안내(§ 위 "입력 없는 목록 조회" 절) |
 
 ## 신규 서비스 추가 시 손대는 파일 (엔진 불변성 체크)
 
 두 카테고리가 있다 — 어느 쪽이든 `framework/`도 `main.py`도 손대지 않는 게 목표이고, `discover_services()`(auto-discovery) 덕분에 실제로 그렇게 됐다. `services/<name>/`에 파일을 놓기만 하면 다음 실행 때 `registry.validate()`가 등록/참조 무결성까지 자동으로 확인해준다.
 
-**레거시/외부 어댑터 서비스** (`subscription_status`, `weather`) — `guides/legacy_adapter_guide.md` 체크리스트 기준, 아래 4개 파일만 새로 만든다.
+**레거시/외부 어댑터 서비스** (`subscription_status`, `weather`, `applicant_list`) — `guides/legacy_adapter_guide.md` 체크리스트 기준, 아래 4개 파일만 새로 만든다.
 - `services/<name>/adapter.py` (`BaseAdapter` 상속)
 - `services/<name>/mapping.json`
 - `services/<name>/workflow.py` (`@workflow_step`/`@judged`(모델 판단) 또는 `@human_action`(사람 판단)/`@tool`)
@@ -317,10 +337,14 @@ INFO  agent_loop.tracing           | trace 6c80695b end   [orchestrator] orchest
 - `WeatherAdapter`는 Open-Meteo(무료, 인증 불필요)를 쓰므로 `weather` 서비스는 `.env`에 키를 넣지 않아도 바로 호출 가능 — 처음에 RapidAPI "yahoo-weather5"(키 필요)로 만들었다가 인증 없는 샘플 테스트에 맞춰 교체함.
 - `requirements.txt`(openai/python-dotenv/requests)가 아직 이 환경에 설치되지 않음 — `pip install -r requirements.txt` 필요.
 - `OpenAIRunner`(tool 라우팅)는 `OPENAI_MODEL` 미지정 시 `gpt-4o-mini`로 기본 동작 — 실제 사용 가능한 모델명으로 `.env`에서 확정해야 함. `manual_review`는 더 이상 OpenAI를 호출하지 않으므로(사람 판단으로 전환) 이 항목과 무관해졌다.
-- `@judged`(모델이 판단하는 judged branch)는 데코레이터·`registry.validate()` 검사·문서까지 다 갖춰져 있지만, `manual_review`가 `@human_action`(사람 판단)으로 전환되면서 지금 `services/` 전체에서 실제로 이 데코레이터를 쓰는 서비스가 하나도 없다 — `framework/prompts/store.py`의 `compose()` + `framework/llm/openai_client.py`의 `complete()` 조합도 같이 orphan됨. 다음에 "사람이 아니라 모델이 판단해야 하는" judged 노드가 생기면 그때 다시 살아있는 예시가 생긴다.
+- `@judged`(모델이 판단하는 judged branch)는 데코레이터·`registry.validate()` 검사·문서까지 다 갖춰져 있지만, `manual_review`가 `@human_action`(사람 판단)으로 전환되면서 지금 `services/` 전체에서 실제로 이 데코레이터를 쓰는 서비스가 하나도 없다 — `framework/prompts/store.py`의 `compose()` + `framework/llm/openai_client.py`의 `complete()` 조합도 같이 orphan됨. **정리 여부**: 이 조합에 실제로 종속돼 있던 서비스별 산출물, 즉 `services/subscription_status/prompts/manual_review.md`(당시 OpenAI에게 자동승인/수동검토를 판단시키던 프롬프트)는 완전히 죽은 파일이라 삭제했다. 반면 `@judged` 데코레이터·`registry.validate()`의 judged 검사·`PromptStore.compose()`·`framework/llm/openai_client.py`는 특정 서비스에 종속된 게 아니라 재사용 가능한 프레임워크 능력이라 그대로 남겨뒀다 — 다음에 "사람이 아니라 모델이 판단해야 하는" judged 노드가 생기면 그때 다시 살아있는 예시가 생긴다.
 - `@human_action`/`AwaitingHumanAction`/`Orchestrator.resume()`으로 만든 human-in-the-loop 일시정지/재개는 `subscription_status`라는 단일 사례로만 검증됐다. `Orchestrator.resume()`은 tool이 `context["last_result"]`를 그대로 반환한다는 관례에 기대므로 `subscription_weather_flow`처럼 자체적으로 반환값을 조립하는 tool에는 아직 쓸 수 없고, 세션 영속화 계층이 없어 paused response의 `context`를 호출자가 프로세스 메모리 안에서 직접 들고 있다가 넘겨야 한다(재시작하면 유실).
 - human_action의 action은 여전히 "라벨 + payload"로만 끝난다 — action이 실제로 다른 capability를 호출·연결하는 것(예: `"서류추가요청"`이 서류 재제출 처리 tool로 실제 핸드오프하는 것)은 의도적으로 미룬 범위다. 실제로 연결할 대상 capability가 생기면 그때 실행 로직을 얹기로 함(YAGNI로 미룬 것이지 빠뜨린 게 아님).
 - `main.py`의 `FirstMatchRunner`는 이름이 긴 tool부터 substring 매칭하도록 고쳤지만(한 tool 이름이 다른 tool 이름을 포함하는 경우 대비, 예: `weather` ⊂ `subscription_weather_flow`), 여전히 순수 문자열 포함 검사라 실제 자연어 요청 라우팅에는 쓸 수 없다 — 오프라인 샘플 테스트 전용 스텁이라는 원래 성격은 그대로.
 - `ToolRegistry.validate()`는 registry 내부 참조 무결성(step/judged/human_action/guardrail 연결)만 본다 — "adapter.py가 BaseAdapter를 상속했는가", "mapping.json이 실제로 존재하는가" 같은 파일 시스템/클래스 계층 검사나, "새 tool description이 기존 tool과 의미가 안 겹치는가" 같은 의미적 검사(`guides/legacy_adapter_guide.md` 체크리스트 항목)는 하지 않는다 — 이런 건 코드로 자동 판별하기 어려워 사람 리뷰 영역으로 남겨둠.
 - `@judged(choices=..., confidence_required="confirmed")`의 `confidence_required`는 `JudgedSpec`에 저장만 되고 실제로 어디서도 읽거나 검사하지 않는다 — "inferred 값은 judged 판단에 넘기면 안 된다"는 규칙은 지금 `fetch_status`가 `status_confidence != "confirmed"`를 직접 체크해서 우회 진입시키는 방식으로만 지켜지고, `@judged` 데코레이터 자체는 이 제약을 강제하지 않는 미완성 지점이다.
 - `subscription_weather_flow`의 중첩 guardrail(§ 위 절)은 **output 내용물**만 boundary에서 검증한다 — 내부에서 직접 호출하는 `subscription_status()`/`weather()` 각각의 `GuardrailChain.run()`(input 검증 포함)은 여전히 우회된다. 지금은 두 tool 모두 input_schema를 선언하지 않아 우연히 gap이 드러나지 않을 뿐이므로, 나중에 어느 한쪽이 input_schema를 추가하면 조합 서비스 경로에서는 그 input 검증이 적용 안 된다는 점을 잊기 쉽다.
+- `ApplicantListAdapter.call()`은 20명 고정 스텁(하드코딩된 리스트) — 실제 레거시 목록 조회 API 연동 시 교체 필요. `applicant_list`와 `subscription_status`가 값은 동일하지만 서로 다른 `mapping.json`을 갖고 있어서(§ 위 "입력 없는 목록 조회" 절 — 의도적 설계), 실제로 상태 체계가 바뀌면 두 파일을 각각 갱신해야 한다는 걸 잊기 쉽다.
+- **미해결 논의 — 서비스 간 "겹치는 필드"를 어떻게 다룰지.** 위 항목의 근본 원인은 두 서비스의 output이 스키마 전체가 겹치는 것도 완전히 독립적인 것도 아니라, 일부 필드만 겹친다는 데 있다(`applicant_id`/`status`/`status_confidence`는 같은 도메인 개념이라 일치해야 하고, `region`/`manual_review_decision`/`name`은 각 서비스 고유). 스키마 전체를 합치거나 완전히 분리하는 이분법 대신, 겹치는 조각만 뽑아 공유 자산으로 만들고(예: 도메인을 대표하는 서비스가 `MAPPING_PATH`/상태 enum 상수를 export하고 다른 서비스가 그 조각만 import) 안 겹치는 필드는 각자 스키마에 남기는 방향으로 논의했다. 프레임워크 차원 규약(`"confirmed"/"inferred"` 같은 `SemanticMapping` 자체의 값)과 도메인 차원 지식(청약 상태 5종 같은 특정 서비스의 값)은 공유 주체가 다르다는 점(전자는 `framework/semantic/mapping.py`, 후자는 그 도메인을 대표하는 서비스)도 같이 짚었다. **아직 구현하지 않음** — 실제 use case(파라미터가 여럿이고 그중 일부만 겹치는 상황이 정확히 어떻게 발생할지)가 명확해지기 전까지는 의도적으로 보류.
+- "목록에서 이름을 보고 다음 요청에 applicant_id를 넣는" 연결은 프롬프트 문구(`prompts/applicant_list.md`)로만 안내할 뿐, 실제로 이름→ID를 찾아 다음 tool 호출의 인자를 채우는 로직은 어디에도 없다 — `AgentRunner`는 tool 이름만 고르고 인자는 여전히 호출자가 직접 채워야 하므로(§ `orchestrator.py`), 이 흐름이 실제로 자동으로 이어지려면 인자까지 추출하는 `AgentRunner` 구현체가 필요하다.
+- `applicant_list`의 `_render_table()`이 만드는 표 포맷(지금은 마크다운 파이프 표)은 **미확정 상태로 남겨둔 것**이다 — "예쁘게 보여주는" 방법은 이 결과를 최종적으로 어디서 보여주느냐(마크다운 렌더링 채팅 UI / raw text 전용 뷰 / 자체 웹 프론트엔드의 테이블 컴포넌트 / 다른 서비스의 프로그램적 소비)에 따라 완전히 달라지는데, 그 실행 환경 자체가 아직 정해지지 않았다. 환경이 정해지기 전까지는 raw text 정렬 로직(한글 폭 계산 등) 같은 특정 방향으로 미리 구현하지 않기로 함 — 다음 작업은 환경이 확정된 뒤 그에 맞는 포맷으로 `_render_table()`을 바꾸는 것.

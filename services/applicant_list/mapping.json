@@ -1,0 +1,10 @@
+{
+  "_comment": "subscription_status/mapping.json과 같은 5단계 상태 체계 — 같은 레거시 청약 시스템의 다른 조회 API(목록 vs 상세)라는 전제라 값 자체는 동일하다. 서비스별로 독립적인 매핑 자산을 갖는다는 원칙에 따라 파일은 분리해뒀다.",
+  "mappings": {
+    "10": {"value": "접수완료", "confidence": "confirmed"},
+    "20": {"value": "서류미비", "confidence": "confirmed"},
+    "30": {"value": "심사중", "confidence": "confirmed"},
+    "40": {"value": "승인완료", "confidence": "confirmed"},
+    "99": {"value": "보류", "confidence": "inferred"}
+  }
+}
