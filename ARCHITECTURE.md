@@ -2,6 +2,16 @@
 
 `README.md`(왜 이 구조가 필요한가)와 `ai_framework_2.md`(설계 철학)의 논의가 실제로 어떤 파일·클래스로 구현됐는지 매핑한 문서다. `services/` 아래 네 서비스가 각기 다른 절의 살아있는 예시다 — `subscription_status`(레거시 어댑터 + human-in-the-loop 판단 노드), `weather`(인증 없는 외부 실 API 어댑터), `subscription_weather_flow`(서비스를 조합하는 서비스), `applicant_list`(입력 없는 목록 조회 + 표 형식 렌더링). `main.py`가 실행 진입점이고, `examples/human_action_demo.py`가 human-in-the-loop 일시정지/재개를 터미널에서 직접 확인해보는 실행 가능한 예시다.
 
+## 열린 질문 요약
+
+아직 구현하지 않고 의도적으로 열어둔 논의들 — 전부 "실제 use case/환경이 아직 안 정해졌다"는 같은 이유로 보류 중이다. 각 항목의 전체 맥락은 § 아래 "현재 스캐폴드의 한계"에 있다.
+
+- **서비스 간 겹치는 필드를 어떻게 공유할지** — `applicant_list`/`subscription_status`처럼 일부 필드만 겹치는 두 서비스의 스키마를 어디까지 공유 자산으로 뽑아낼지. 파라미터가 여럿이고 일부만 겹치는 실제 use case가 나오기 전까진 보류.
+- **`applicant_list`의 표(`table`) 렌더링 포맷** — 마크다운 파이프 표가 최종 형태인지 여부는 이 결과를 어디서 보여줄지(실행/렌더링 환경)에 달려 있는데 그 환경 자체가 아직 안 정해짐.
+- **LangGraph의 checkpointer식 영속화가 필요한가** — `Orchestrator.resume()`이 멈춘 상태를 프로세스 메모리로만 들고 있는 한계. 사람이 몇 시간~며칠 뒤에 판단하는 실제 시나리오나 분산 배포가 실제로 필요해지기 전까진 보류.
+- **병렬 분기(fan-out/join)가 필요한가** — `StateMachine`은 순차 실행만 지원. 의존관계 없는 두 호출을 동시에 불러야 할 만큼 느린 실제 사례가 나오기 전까진 보류.
+- **tool 본문에 `complete()`를 직접 호출하는 것의 트레이드오프** — bounded choices(감사 가능)를 포기하는 대신 완전히 자유로운 생성을 얻는 선택. 정형화가 원천적으로 불가능한 자유 텍스트 생성이 목적인 tool이 실제로 필요해지기 전까진 열어만 둠.
+
 ## 디렉토리 구조
 
 ```
@@ -386,6 +396,8 @@ INFO  agent_loop.tracing           | trace 6c80695b end   [orchestrator] orchest
 - `steps.judged()`(모델이 판단하는 judged branch)는 메서드·`WorkflowRegistry.validate()` 검사·문서까지 다 갖춰져 있지만, `manual_review`가 `steps.human_action()`(사람 판단)으로 전환되면서 지금 `services/` 전체에서 실제로 이 메서드를 쓰는 서비스가 하나도 없다 — `framework/prompts/store.py`의 `compose()` + `framework/llm/openai_client.py`의 `complete()` 조합도 같이 orphan됨. **정리 여부**: 이 조합에 실제로 종속돼 있던 서비스별 산출물, 즉 `services/subscription_status/prompts/manual_review.md`(당시 OpenAI에게 자동승인/수동검토를 판단시키던 프롬프트)는 완전히 죽은 파일이라 삭제했다. 반면 `steps.judged()`·`WorkflowRegistry.validate()`의 judged 검사·`PromptStore.compose()`·`framework/llm/openai_client.py`는 특정 서비스에 종속된 게 아니라 재사용 가능한 프레임워크 능력이라 그대로 남겨뒀다 — 다음에 "사람이 아니라 모델이 판단해야 하는" judged 노드가 생기면 그때 다시 살아있는 예시가 생긴다.
 - `steps.human_action()`/`AwaitingHumanAction`/`Orchestrator.resume()`으로 만든 human-in-the-loop 일시정지/재개는 `subscription_status`라는 단일 사례로만 검증됐다. `Orchestrator.resume()`은 tool이 `context["last_result"]`를 그대로 반환한다는 관례에 기대므로 `subscription_weather_flow`처럼 자체적으로 반환값을 조립하는 tool에는 아직 쓸 수 없고, 세션 영속화 계층이 없어 paused response의 `context`를 호출자가 프로세스 메모리 안에서 직접 들고 있다가 넘겨야 한다(재시작하면 유실).
 - **미해결 논의 — LangGraph의 checkpointer식 영속화가 필요한가.** 위 항목의 근본 원인은 "멈춘 상태를 프로세스 메모리 밖(DB 등)에 저장했다가, 나중에 다른 프로세스/다른 시점에서도 정확히 그 지점부터 재개한다"는 기능 자체가 없다는 것이다. LangGraph의 checkpointer가 하는 일과 비교하며 논의했는데, `manual_review`가 대표하는 실제 업무(사람이 서류를 몇 시간~며칠 걸려 검토)를 생각하면 이 갭은 실재한다는 데는 동의했다. **아직 구현하지 않음** — 세션 저장소 종류(파일/Redis/DB)와 배포 형태(단일 프로세스 유지 vs 여러 워커로 분산)가 안 정해진 채로 먼저 만들면 나중에 실제 요구사항이 드러났을 때 다시 뜯어고칠 위험이 크다는 판단. 실제로 필요해지는 신호는 (1) 사람이 몇 시간/며칠 뒤에 승인·반려하는 실제(모의가 아닌) 시나리오가 생기는가, (2) 그 사이 서버 재시작이나 여러 인스턴스 분산 배포가 실제로 필요한가 — 이 둘 중 하나라도 나타나면 그때 checkpointer 스타일 영속화를 설계한다.
+- **미해결 논의 — 병렬 분기(fan-out/join)가 필요한가.** `StateMachine.run()`(`framework/workflow/state_machine.py:51-94`)은 `current` 변수 하나로 추적하는 순수 순차 루프라 `next`의 outcome이 항상 다음 스텝 "하나"로만 resolve된다 — 여러 스텝을 동시에 실행하고 결과를 합치는 fan-out/join 개념 자체가 없다. "두 서비스의 결과를 같이 들고 다음 지점으로 넘어가야 하는" 요구는 이미 지금 방식(공유 `context`에 각자 순차적으로 결과를 채우는 것 — `subscription_weather_flow`가 실제 사례)으로 충분하다는 데는 합의했다. 진짜 동시 실행(두 호출 사이에 데이터 의존관계가 없어서 지연시간을 줄이려고 병렬로 부르는 것)은 `next`가 여러 타겟을 가리키게 하고 join 지점을 새로 설계해야 하는, 지금 없는 기능이다. **아직 구현하지 않음** — 지금 4개 서비스 중 "의존관계 없는 두 호출을 동시에 불러야 할 만큼 느린" 실제 사례가 없어서, 그런 필요가 실제로 발생할 때까지 보류.
+- **미해결 논의 — tool 본문 안에 `complete()`를 직접 박아넣으면 어떻게 되는가.** 지금 이 프로그램 전체에서 AI가 실제로 결정에 참여하는 지점은 `OpenAIRunner.choose_tool()`(tool 선택) 단 한 곳뿐이다(`grep`으로 확인 — `complete()` 호출부가 `main.py:59`에만 있음). `judged`/`human_action`이 감사 가능성을 위해 bounded choices를 강제하는 것과 달리, tool 함수 본문에서 `framework.llm.openai_client.complete()`를 직접 호출하는 건 파이썬 문법상 막을 방법이 없다 — 다만 그러면 반환값의 형태를 코드 어디에도 선언할 수 없어 `guardrail`/`registry.validate()`/`WorkflowRegistry.validate()`가 검증할 대상 자체가 사라지고, 로그에도 "왜 이 결과가 나왔는지"가 `judged '...' -> '...'` 같은 명확한 라인이 아니라 자유 텍스트 생성으로만 남는다. 즉 "선택은 자유롭되 감사는 가능해야 한다"는 이 프레임워크의 핵심 제약을 그 tool 안에서는 포기하는 트레이드오프다. **아직 구현하지 않음** — 정형화가 원천적으로 불가능한 자유 텍스트 생성이 목적 자체인 tool이 실제로 필요해지기 전까지는 열어둔 질문으로만 남겨둔다.
 - human_action의 action은 여전히 "라벨 + payload"로만 끝난다 — action이 실제로 다른 capability를 호출·연결하는 것(예: `"서류추가요청"`이 서류 재제출 처리 tool로 실제 핸드오프하는 것)은 의도적으로 미룬 범위다. 실제로 연결할 대상 capability가 생기면 그때 실행 로직을 얹기로 함(YAGNI로 미룬 것이지 빠뜨린 게 아님).
 - `main.py`의 `FirstMatchRunner`는 이름이 긴 tool부터 substring 매칭하도록 고쳤지만(한 tool 이름이 다른 tool 이름을 포함하는 경우 대비, 예: `weather` ⊂ `subscription_weather_flow`), 여전히 순수 문자열 포함 검사라 실제 자연어 요청 라우팅에는 쓸 수 없다 — 오프라인 샘플 테스트 전용 스텁이라는 원래 성격은 그대로.
 - `ToolRegistry.validate()`(tool/guardrail 카탈로그)와 `WorkflowRegistry.validate()`(파일별 step/next/judged/human_action) 둘 다 참조 무결성만 본다 — "adapter.py가 BaseAdapter를 상속했는가", "mapping.json이 실제로 존재하는가" 같은 파일 시스템/클래스 계층 검사나, "새 tool description이 기존 tool과 의미가 안 겹치는가" 같은 의미적 검사(`guides/legacy_adapter_guide.md` 체크리스트 항목)는 하지 않는다 — 이런 건 코드로 자동 판별하기 어려워 사람 리뷰 영역으로 남겨둠.
