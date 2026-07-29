@@ -1,12 +1,11 @@
 from __future__ import annotations
 
-import functools
 import inspect
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any, Callable
 
 from framework.harness.logging_setup import get_logger
-from framework.harness.schema import SchemaViolation, validate_schema
+from framework.workflow.registry import WorkflowRegistry
 
 logger = get_logger("registry")
 
@@ -17,29 +16,7 @@ class ToolSpec:
     description: str
     func: Callable
     input_schema: dict[str, Any]
-
-
-@dataclass
-class WorkflowStepSpec:
-    order: int
-    source: str | None
-    next: dict[str, str] | None
-    max_retries: int
-    func: Callable
-
-
-@dataclass
-class JudgedSpec:
-    choices: tuple[str, ...]
-    confidence_required: str
-    func: Callable
-
-
-@dataclass
-class HumanActionSpec:
-    choices: tuple[str, ...]
-    payload_schemas: dict[str, dict[str, Any]] | None
-    func: Callable
+    workflow_registry: WorkflowRegistry | None = None
 
 
 @dataclass
@@ -50,21 +27,24 @@ class GuardrailSpec:
 
 
 class ServiceConsistencyError(Exception):
-    """auto-discovery 직후 registry.validate()가 참조 무결성 위반을 발견하면 던진다.
+    """auto-discovery 직후 registry.validate()가 tool/guardrail 카탈로그의 참조 무결성 위반을 발견하면 던진다.
 
     서비스 하나가 부분적으로만 구현된 채(등록은 되지만 내부적으로 깨진 상태) 조용히
     넘어가는 걸 막는 게 목적 — StateMachine.run() 시점까지 미루지 않고 기동 시점에 fail-fast.
+    workflow(파일) 내부의 step/next/judged/human_action 무결성은 여기가 아니라 각 파일의
+    `WorkflowRegistry.validate()`(-> `WorkflowConsistencyError`)가 담당한다.
     """
 
 
 class ToolRegistry:
-    """새 서비스 = 새 tool 파일 등록. 오케스트레이터는 이 registry만 참조한다."""
+    """새 서비스 = 새 tool 파일 등록. 오케스트레이터는 이 registry만 참조한다.
+
+    workflow_step/judged/human_action은 여기 없다 — 그건 tool(파일) 내부 배선이라
+    각 파일이 갖는 `framework.workflow.registry.WorkflowRegistry` 인스턴스가 따로 관리한다.
+    """
 
     def __init__(self) -> None:
         self._tools: dict[str, ToolSpec] = {}
-        self._workflow_steps: dict[str, WorkflowStepSpec] = {}
-        self._judged: dict[str, JudgedSpec] = {}
-        self._human_actions: dict[str, HumanActionSpec] = {}
         self._guardrails: dict[str, GuardrailSpec] = {}
 
     def register_tool(self, spec: ToolSpec) -> None:
@@ -72,87 +52,28 @@ class ToolRegistry:
             raise ValueError(f"tool '{spec.name}' already registered")
         self._tools[spec.name] = spec
 
-    def register_workflow_step(self, name: str, spec: WorkflowStepSpec) -> None:
-        self._workflow_steps[name] = spec
-
-    def register_judged(self, name: str, spec: JudgedSpec) -> None:
-        self._judged[name] = spec
-
-    def register_human_action(self, name: str, spec: HumanActionSpec) -> None:
-        self._human_actions[name] = spec
-
     def register_guardrail(self, name: str, spec: GuardrailSpec) -> None:
         self._guardrails[name] = spec
 
     def tools(self) -> dict[str, ToolSpec]:
         return dict(self._tools)
 
-    def workflow_steps(self) -> dict[str, WorkflowStepSpec]:
-        return dict(self._workflow_steps)
-
     def guardrail_for(self, name: str) -> GuardrailSpec | None:
         return self._guardrails.get(name)
 
-    def judged_for(self, name: str) -> JudgedSpec | None:
-        return self._judged.get(name)
-
-    def human_action_for(self, name: str) -> HumanActionSpec | None:
-        return self._human_actions.get(name)
-
     def validate(self) -> None:
-        """등록된 스펙들 사이의 참조 무결성을 검사한다 (registry 내부 상태만으로 판단 가능한 것만).
+        """등록된 tool/guardrail 사이의 참조 무결성을 검사한다 (registry 내부 상태만으로 판단 가능한 것만).
 
-        auto-discovery로 서비스를 스캔한 직후 한 번 호출하는 걸 전제로 한다 — 개별 모듈을
-        import하는 시점이 아니라, 모든 서비스가 등록을 마친 뒤에 전체 그래프를 봐야 next
-        참조처럼 다른 모듈이 등록한 step을 가리키는 경우까지 정확히 검사할 수 있다.
+        auto-discovery로 서비스를 스캔한 직후 한 번 호출하는 걸 전제로 한다. 각 서비스
+        파일 내부의 step/next 그래프 무결성은 그 파일이 import되는 시점에 자기 자신의
+        `WorkflowRegistry.validate()`로 이미 검증됐으므로 여기서 다시 보지 않는다.
         """
         logger.info(
-            "validating registry: tools=%d workflow_steps=%d judged=%d human_actions=%d guardrails=%d",
-            len(self._tools), len(self._workflow_steps), len(self._judged),
-            len(self._human_actions), len(self._guardrails),
+            "validating registry: tools=%d guardrails=%d", len(self._tools), len(self._guardrails),
         )
         if not self._tools:
             logger.error("no tool registered")
             raise ServiceConsistencyError("no tool registered — services/ 아래 워크플로우가 하나도 import되지 않았다")
-
-        step_names = set(self._workflow_steps)
-        for step_name, step_spec in self._workflow_steps.items():
-            if step_spec.next is None:
-                continue
-            for outcome, target in step_spec.next.items():
-                if target == "DONE" or target in step_names:  # "DONE" == workflow.state_machine.TERMINAL
-                    continue
-                logger.error("workflow_step '%s' next[%r]='%s' is unresolved", step_name, outcome, target)
-                raise ServiceConsistencyError(
-                    f"workflow_step '{step_name}'의 next[{outcome!r}]='{target}'가 등록된 "
-                    f"step 이름 어디에도 없다 (오타 의심)"
-                )
-
-        for judged_name in self._judged:
-            if judged_name not in self._workflow_steps:
-                logger.error("judged node '%s' registered without @workflow_step", judged_name)
-                raise ServiceConsistencyError(
-                    f"judged node '{judged_name}'가 @workflow_step 없이 등록됐다 — "
-                    "judged 노드는 반드시 @workflow_step과 함께 선언해야 state machine에 편입된다"
-                )
-
-        for action_name, action_spec in self._human_actions.items():
-            if action_name not in self._workflow_steps:
-                logger.error("human_action node '%s' registered without @workflow_step", action_name)
-                raise ServiceConsistencyError(
-                    f"human_action node '{action_name}'가 @workflow_step 없이 등록됐다 — "
-                    "human_action 노드는 반드시 @workflow_step과 함께 선언해야 state machine에 편입된다"
-                )
-            for action in action_spec.payload_schemas or {}:
-                if action not in action_spec.choices:
-                    logger.error(
-                        "human_action node '%s' has payload_schemas for action %r, not in declared choices %s",
-                        action_name, action, action_spec.choices,
-                    )
-                    raise ServiceConsistencyError(
-                        f"human_action node '{action_name}'의 payload_schemas 키 '{action}'가 "
-                        f"choices {action_spec.choices} 안에 없다 (오탈자 의심)"
-                    )
 
         for tool_name, guardrail_spec in self._guardrails.items():
             tool_spec = self._tools.get(tool_name)
@@ -179,115 +100,27 @@ def _infer_schema(func: Callable) -> dict[str, Any]:
     }
 
 
-def tool(name: str, description: str) -> Callable:
-    """오케스트레이터가 커플링되는 유일한 표면(스키마+설명)을 선언한다."""
+def tool(name: str, description: str, *, workflow_registry: WorkflowRegistry | None = None) -> Callable:
+    """오케스트레이터가 커플링되는 유일한 표면(스키마+설명)을 선언한다.
 
-    def decorator(func: Callable) -> Callable:
-        registry.register_tool(
-            ToolSpec(name=name, description=description, func=func, input_schema=_infer_schema(func))
-        )
-        func.__tool_name__ = name
-        return func
-
-    return decorator
-
-
-def workflow_step(
-    order: int,
-    *,
-    source: str | None = None,
-    next: dict[str, str] | None = None,
-    max_retries: int = 0,
-) -> Callable:
-    """결정론적 분기/순환은 여기 next 맵으로 고정한다. agent 재추론 대상이 아니다."""
-
-    def decorator(func: Callable) -> Callable:
-        name = func.__name__
-
-        @functools.wraps(func)
-        def wrapper(*args: Any, **kwargs: Any) -> str:
-            outcome = func(*args, **kwargs)
-            if next is not None and outcome not in next:
-                logger.error("step '%s' returned outcome %r, not in declared next %s", name, outcome, list(next))
-                raise ValueError(f"step '{name}' returned outcome '{outcome}', not in declared next {list(next)}")
-            return outcome
-
-        registry.register_workflow_step(
-            name,
-            WorkflowStepSpec(order=order, source=source, next=next, max_retries=max_retries, func=wrapper),
-        )
-        wrapper.__step_name__ = name
-        return wrapper
-
-    return decorator
-
-
-def judged(choices: tuple[str, ...], *, confidence_required: str = "confirmed") -> Callable:
-    """선택지를 유한 집합으로 강제 — 이 제약이 없으면 자유 위임과 구분이 사라진다."""
-
-    def decorator(func: Callable) -> Callable:
-        name = func.__name__
-        registry.register_judged(
-            name, JudgedSpec(choices=choices, confidence_required=confidence_required, func=func)
-        )
-
-        @functools.wraps(func)
-        def wrapper(*args: Any, **kwargs: Any) -> str:
-            result = func(*args, **kwargs)
-            if result not in choices:
-                logger.error("judged node '%s' returned %r, not in bounded choices %s", name, result, choices)
-                raise ValueError(f"judged node '{name}' returned '{result}', not in bounded choices {choices}")
-            logger.info("judged '%s' -> %r", name, result)
-            return result
-
-        wrapper.__judged_name__ = name
-        return wrapper
-
-    return decorator
-
-
-def human_action(
-    choices: tuple[str, ...], *, payload_schemas: dict[str, dict[str, Any]] | None = None
-) -> Callable:
-    """`@judged`와 계약(bounded choices)은 같지만 판단 주체가 모델이 아니라 사람이다.
-
-    함수는 사람의 답이 아직 없으면 `framework.workflow.state_machine.AwaitingHumanAction`을
-    던져 실행을 멈추고, 답이 있으면 `{"action": <choices 중 하나>, ...payload}` 형태의
-    dict를 반환해야 한다. action별로 다른 payload 구조가 필요하면(예: "서류추가요청"은
-    어떤 서류가 더 필요한지 담아야 함) `payload_schemas`에 action별 스키마를 선언한다 —
-    action 종류 자체는 여전히 유한 집합(bounded)이고, 그 안의 세부 데이터만 자유롭게
-    구조화된다는 원칙(자유 라우팅과 구분되는 judged branch의 핵심)은 그대로 유지된다.
+    `workflow_registry`는 이 tool이 내부적으로 human_action(pause/resume)을 쓸 때만
+    필요하다 — `Orchestrator.resume()`이 "멈췄던 step부터 재개"하려면 그 step이 등록된
+    파일의 `WorkflowRegistry` 인스턴스를 알아야 하기 때문. pause 없이 끝까지 실행되는
+    tool은 생략해도 된다.
     """
 
     def decorator(func: Callable) -> Callable:
-        name = func.__name__
-        registry.register_human_action(
-            name, HumanActionSpec(choices=choices, payload_schemas=payload_schemas, func=func)
+        registry.register_tool(
+            ToolSpec(
+                name=name,
+                description=description,
+                func=func,
+                input_schema=_infer_schema(func),
+                workflow_registry=workflow_registry,
+            )
         )
-
-        @functools.wraps(func)
-        def wrapper(*args: Any, **kwargs: Any) -> str:
-            result = func(*args, **kwargs)
-            action = result.get("action") if isinstance(result, dict) else result
-            if action not in choices:
-                logger.error("human_action '%s' returned action %r, not in bounded choices %s", name, action, choices)
-                raise ValueError(f"human_action '{name}' returned action {action!r}, not in bounded choices {choices}")
-
-            schema = (payload_schemas or {}).get(action)
-            if schema is not None:
-                try:
-                    validate_schema(result, schema)
-                except SchemaViolation as e:
-                    logger.error("human_action '%s' payload invalid for action %r: %s", name, action, e.detail)
-                    raise ValueError(
-                        f"human_action '{name}' payload invalid for action {action!r}: {e.detail}"
-                    ) from e
-
-            logger.info("human_action '%s' -> %r", name, action)
-            return action
-
-        wrapper.__human_action_name__ = name
-        return wrapper
+        func.__tool_name__ = name
+        return func
 
     return decorator
 

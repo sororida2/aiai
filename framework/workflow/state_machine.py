@@ -5,7 +5,7 @@ from typing import Any, Callable
 
 from framework.harness.logging_setup import get_logger
 from framework.harness.tracing import tracer
-from framework.registry.decorators import ToolRegistry, WorkflowStepSpec
+from framework.workflow.registry import WorkflowRegistry, WorkflowStepSpec
 
 logger = get_logger("state_machine")
 
@@ -42,11 +42,11 @@ class StateMachine:
     @judged 데코레이터가 강제).
     """
 
-    registry: ToolRegistry
+    registry: WorkflowRegistry
     entry: str
 
     def steps(self) -> dict[str, WorkflowStepSpec]:
-        return self.registry.workflow_steps()
+        return self.registry.steps()
 
     def run(self, context: dict[str, Any]) -> dict[str, Any]:
         steps = self.steps()

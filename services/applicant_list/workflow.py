@@ -2,20 +2,8 @@ from __future__ import annotations
 
 from typing import Any
 
-from framework.registry.decorators import guardrail, registry, tool, workflow_step
-from framework.workflow.state_machine import StateMachine
+from framework.registry.decorators import guardrail, tool
 from services.applicant_list.adapter import ApplicantListAdapter
-
-
-@workflow_step(order=1, next={"완료": "DONE"})
-def fetch_applicants(context: dict[str, Any]) -> str:
-    adapter: ApplicantListAdapter = context["adapter"]
-    context["last_result"] = adapter.execute()
-    return "완료"
-
-
-def build_state_machine() -> StateMachine:
-    return StateMachine(registry=registry, entry="fetch_applicants")
 
 
 def _render_table(applicants: list[dict[str, Any]]) -> str:
@@ -37,7 +25,5 @@ def _render_table(applicants: list[dict[str, Any]]) -> str:
 )
 @guardrail(output_schema={"applicants": Any, "table": Any})
 def applicant_list() -> dict[str, Any]:
-    context: dict[str, Any] = {"adapter": ApplicantListAdapter()}
-    build_state_machine().run(context)
-    applicants = context["last_result"]["applicants"]
+    applicants = ApplicantListAdapter().execute()["applicants"]
     return {"applicants": applicants, "table": _render_table(applicants)}

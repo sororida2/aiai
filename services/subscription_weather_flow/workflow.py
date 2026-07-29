@@ -2,27 +2,33 @@ from __future__ import annotations
 
 from typing import Any
 
-from framework.registry.decorators import guardrail, registry, tool, workflow_step
+from framework.registry.decorators import guardrail, tool
+from framework.workflow.registry import WorkflowRegistry
 from framework.workflow.state_machine import StateMachine
 from services.subscription_status.workflow import SUBSCRIPTION_STATUS_OUTPUT_SCHEMA, subscription_status
 from services.weather.workflow import WEATHER_OUTPUT_SCHEMA, weather
 
+steps = WorkflowRegistry()
 
-@workflow_step(order=1, next={"완료": "query_weather"})
+
+@steps.step(order=1, next={"완료": "query_weather"})
 def query_subscription(context: dict[str, Any]) -> str:
     context["subscription_result"] = subscription_status(applicant_id=context["applicant_id"])
     return "완료"
 
 
-@workflow_step(order=2, next={"완료": "DONE"})
+@steps.step(order=2, next={"완료": "DONE"})
 def query_weather(context: dict[str, Any]) -> str:
     region = context["subscription_result"]["region"]
     context["weather_result"] = weather(location=region)
     return "완료"
 
 
+steps.validate()
+
+
 def build_state_machine() -> StateMachine:
-    return StateMachine(registry=registry, entry="query_subscription")
+    return StateMachine(registry=steps, entry="query_subscription")
 
 
 @tool(

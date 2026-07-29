@@ -69,11 +69,18 @@ class Orchestrator:
         (`subscription_weather_flow`처럼 자체적으로 반환값을 조립하는 tool은
         아직 대상이 아니다).
         """
+        tool_spec = self.registry.tools().get(tool_name)
+        if tool_spec is None or tool_spec.workflow_registry is None:
+            raise ValueError(
+                f"tool '{tool_name}'에는 workflow_registry가 없다 — @tool(workflow_registry=...)로 "
+                "연결된 tool만 resume() 대상이 될 수 있다"
+            )
+
         context["human_action"] = action
         logger.info("resuming: tool=%s step=%s action=%s", tool_name, step, action)
 
         def run_from_paused() -> dict[str, Any]:
-            StateMachine(registry=self.registry, entry=step).run(context)
+            StateMachine(registry=tool_spec.workflow_registry, entry=step).run(context)
             return context["last_result"]
 
         with tracer.start_trace(name="orchestrator-resume"):

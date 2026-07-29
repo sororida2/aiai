@@ -6,7 +6,7 @@
 
 ```
 framework/                  ← 엔진. 새 서비스를 추가해도 손대지 않는 것이 목표.
-├── registry/decorators.py  ← @tool·@workflow_step·@judged·@human_action·@guardrail 데코레이터 + ToolRegistry(+ validate())
+├── registry/decorators.py  ← @tool·@guardrail 데코레이터 + 전역 ToolRegistry(+ validate()) — tool 카탈로그(라우팅 표면)만 관리
 ├── registry/discovery.py    ← services/<name>/workflow.py 자동 스캔·import (discover_services)
 ├── orchestrator.py          ← Triage 라우팅 (Orchestrator, AgentRunner Protocol) + 일시정지/재개(resume())
 ├── harness/
@@ -20,29 +20,31 @@ framework/                  ← 엔진. 새 서비스를 추가해도 손대지 
 ├── semantic/mapping.py      ← 레거시 원시값→정규화값 (SemanticMapping, MappedValue)
 ├── adapters/base.py         ← 양면 어댑터 추상 (BaseAdapter: call / normalize / execute)
 ├── llm/openai_client.py     ← OpenAI 호출 얇은 wrapper (complete()) — 엔진이 아니라 필요한 지점에서 opt-in으로 import
-└── workflow/state_machine.py← 고정 파이프라인 실행기 (StateMachine) + AwaitingHumanAction(사람의 답 대기 신호)
+└── workflow/
+    ├── registry.py           ← WorkflowRegistry(.step()·.judged()·.human_action()·.validate()) — tool(파일)마다 로컬 인스턴스를 하나씩 만들어 씀
+    └── state_machine.py      ← 고정 파이프라인 실행기 (StateMachine) + AwaitingHumanAction(사람의 답 대기 신호)
 
 services/                   ← 설정. 새 서비스 추가 시 여기만 늘어난다 (main.py도 안 건드림 — auto-discovery).
 ├── subscription_status/
 │   ├── adapter.py           ← SubscriptionStatusAdapter(BaseAdapter)
 │   ├── mapping.json          ← 상태코드 confirmed/inferred 매핑 테이블
-│   ├── workflow.py           ← @workflow_step 파이프라인 + @human_action 노드(manual_review, 사람의
+│   ├── workflow.py           ← 로컬 WorkflowRegistry(steps) 기반 파이프라인 + @human_action 노드(manual_review, 사람의
 │   │                            action 선택을 기다렸다가 이어서 실행) + 최상위 @tool
 │   └── prompts/subscription_status.md  ← 이 tool 전용 프롬프트
 ├── weather/                  ← 두 번째 살아있는 예시 (외부 실 API 연동 케이스, 인증 불필요)
 │   ├── adapter.py           ← WeatherAdapter(BaseAdapter), Open-Meteo 지오코딩 + 현재 날씨 호출
 │   ├── mapping.json          ← WMO weather code(공식 문서화 표) → 한국어 정규화 테이블
-│   ├── workflow.py           ← 단일 스텝 파이프라인(fetch_weather) + 최상위 @tool
+│   ├── workflow.py           ← 분기/재시도가 없어 WorkflowRegistry/StateMachine 없이 @tool이 어댑터를 직접 호출
 │   └── prompts/weather.md    ← 이 tool 전용 프롬프트
 ├── subscription_weather_flow/← 세 번째 예시: 어댑터 서비스가 아니라 "서비스를 조합하는 서비스"
 │   ├── workflow.py           ← adapter.py/mapping.json 없음 — subscription_status()/weather() tool 함수를
-│   │                            그대로 호출해 조합하는 @workflow_step 2단계 + 최상위 @tool
+│   │                            그대로 호출해 조합하는 로컬 WorkflowRegistry(steps) 2단계 + 최상위 @tool
 │   └── prompts/subscription_weather_flow.md
 └── applicant_list/            ← 네 번째 예시: 입력 없는 tool + 표 형식 렌더링
     ├── adapter.py           ← ApplicantListAdapter(BaseAdapter), 20명 스텁 목록 + subscription_status와
     │                            같은 5단계 상태 체계(별도 mapping.json, 값은 동일)로 정규화
     ├── mapping.json
-    ├── workflow.py           ← 단일 스텝(fetch_applicants) + 최상위 @tool이 마크다운 표(`table`)까지 조립
+    ├── workflow.py           ← weather와 마찬가지로 WorkflowRegistry 없이 @tool이 어댑터 직접 호출 + 마크다운 표(`table`) 조립
     └── prompts/applicant_list.md
 
 main.py                     ← 조립 지점 (discover_services + registry.validate(), build_orchestrator,
@@ -55,36 +57,67 @@ guides/legacy_adapter_guide.md ← 신규 서비스 추가 가이드
 
 ## 컴포넌트별 역할
 
-### `registry/decorators.py` — 등록 규약의 단일 지점
-전역 `registry = ToolRegistry()` 하나에 다섯 종류 스펙이 모인다.
-- `@tool(name, description)` → `ToolSpec` (오케스트레이터가 유일하게 커플링되는 표면)
-- `@workflow_step(order, next=..., max_retries=...)` → `WorkflowStepSpec` (결정론적 분기/순환을 `next` dict로 고정) + 실행 시 반환값이 `next`의 키 밖이면 즉시 `ValueError` (`@judged`/`@human_action`과 같은 방식의 즉시 검증)
-- `@judged(choices=...)` → `JudgedSpec` + 실행 시 `choices` 밖 값이면 즉시 `ValueError` (bounded 강제, 판단 주체는 모델)
-- `@human_action(choices=..., payload_schemas=...)` → `HumanActionSpec` + 실행 시 action이 `choices` 밖이거나 payload가 선언된 스키마를 어기면 즉시 `ValueError` (bounded 강제, 판단 주체는 사람) — § 아래 "human-in-the-loop" 절
+### `registry/decorators.py` — 전역 tool 카탈로그
+전역 `registry = ToolRegistry()`에는 딱 두 종류 스펙만 모인다.
+- `@tool(name, description, workflow_registry=None)` → `ToolSpec` (오케스트레이터가 유일하게 커플링되는 표면). `workflow_registry`는 이 tool 내부에 `@human_action`(pause 가능) 노드가 있을 때만 넘긴다 — § 아래 "human-in-the-loop" 절.
 - `@guardrail(input_schema=..., output_schema=...)` → `GuardrailSpec`
 
-모듈을 import하는 순간 데코레이터가 실행되며 등록된다. 예전에는 `main.py`에 서비스마다 `from services.<name> import workflow as _`를 나열해 이 import를 직접 트리거했지만, 지금은 `framework/registry/discovery.py`의 `discover_services()`가 `services/` 아래를 스캔해서 대신 트리거한다 (§ 아래 `registry/discovery.py` 절).
+`workflow_step`/`judged`/`human_action`은 여기 없다 — **왜 없는지가 이 리팩터의 핵심**이다(§ 아래 `workflow/registry.py` 절). `@tool`만 전역이어야 하는 이유는 단순하다: 오케스트레이터가 라우팅하려면 모든 서비스의 tool을 한 곳에서 봐야 하기 때문. 반면 파이프라인 내부의 스텝/분기는 그 tool 하나만의 배선이라 전역으로 공유할 이유가 없다.
 
-**`@workflow_step` vs `@judged`/`@human_action` — 헷갈리기 쉬운 지점.** 기준은 단 하나, "이 스텝의 결과값이 코드 로직으로 나오는가, 판단(모델 또는 사람)으로 나오는가"뿐이다.
+모듈을 import하는 순간 `@tool`/`@guardrail` 데코레이터가 실행되며 등록된다. 예전에는 `main.py`에 서비스마다 `from services.<name> import workflow as _`를 나열해 이 import를 직접 트리거했지만, 지금은 `framework/registry/discovery.py`의 `discover_services()`가 `services/` 아래를 스캔해서 대신 트리거한다 (§ 아래 `registry/discovery.py` 절).
 
-| | `@workflow_step` | `@judged` | `@human_action` |
+### `workflow/registry.py` — tool(파일)마다 독립된 로컬 workflow 네임스페이스
+**왜 이게 별도 모듈로 분리됐는가.** 원래는 `workflow_step`/`judged`/`human_action`도 전역 `ToolRegistry` 하나에 함수 이름으로만 키를 걸어 등록했다. 이 설계에는 세 가지 문제가 있었다.
+
+1. **스텝 이름 충돌이 조용히 덮어써진다.** 전역 dict라 서로 다른 두 서비스 파일이 우연히 같은 함수명을 쓰면(`register_tool`과 달리 중복 검사가 없어서) 나중에 import된 쪽이 앞의 등록을 조용히 덮어쓴다.
+2. **`next` 참조가 파일 경계를 모른다.** 검증이 "등록된 step 이름 전체 집합" 안에 있는지만 봐서, A 서비스의 `next`가 실수로 B 서비스의 step 이름을 가리켜도 통과된다.
+3. **`order`가 전역에서는 의미가 성립하지 않는다.** `subscription_weather_flow`처럼 이미 등록된 tool을 재사용해 새 조합을 만들 때, 같은 스텝이 어떤 workflow에 속하느냐에 따라 "몇 번째로 실행되는가"가 달라질 수 있는데, `order`/`next`가 스텝 자체(전역 스펙)에 고정돼 있으면 애초에 "여러 workflow가 같은 스텝을 다르게 조합"하는 게 불가능하다.
+
+그래서 `order`/`next`/`max_retries`(그리고 그 위에 얹히는 `judged`/`human_action`)를 전역 `ToolRegistry`에서 떼어내 `WorkflowRegistry`라는 별도 클래스로 옮겼다. 각 `services/<name>/workflow.py`는 자기 전용 인스턴스를 하나 만든다:
+```python
+steps = WorkflowRegistry()          # 이 파일 전용 — 다른 파일과 이름이 겹쳐도 충돌 불가능
+
+@steps.step(order=1, next={"완료": "DONE"})
+def fetch_weather(context): ...
+
+steps.validate()                    # 이 파일만으로 즉시 검증 가능 (다른 서비스 import를 기다릴 필요 없음)
+```
+- `steps.step(order, *, source=None, next=None, max_retries=0)` — 예전 `@workflow_step`과 동일한 계약(결정론적 분기/순환을 `next` dict로 고정, 반환값이 `next`의 키 밖이면 즉시 `ValueError`)이지만 이 인스턴스 안에서만 이름공간이 닫힌다.
+- `steps.judged(choices=...)` / `steps.human_action(choices=..., payload_schemas=None)` — 예전 `@judged`/`@human_action`과 동일한 계약, 등록 위치만 이 인스턴스로 바뀜.
+- `steps.validate()` — 이 파일 안에서만 판단 가능한 참조 무결성(아래 절)을 검사하고 `WorkflowConsistencyError`를 던진다. **다른 서비스가 전부 import되길 기다릴 필요가 없어서** 파일 하단에서 바로 호출해 즉시 fail-fast할 수 있다 — 예전엔 전역 `registry.validate()`가 모든 서비스 import가 끝난 뒤(`main.py`)에야 이 검사를 할 수 있었던 것과 대조적이다.
+
+`StateMachine(registry=..., entry=...)`의 `registry` 파라미터도 이제 전역 `ToolRegistry`가 아니라 이 `WorkflowRegistry` 인스턴스를 받는다(§ 아래 `workflow/state_machine.py` 절) — 각 서비스의 `build_state_machine()`이 자기 `steps`를 넘긴다.
+
+**`step()` vs `judged()`/`human_action()` — 헷갈리기 쉬운 지점.** 기준은 단 하나, "이 스텝의 결과값이 코드 로직으로 나오는가, 판단(모델 또는 사람)으로 나오는가"뿐이다.
+
+| | `steps.step()` | `steps.judged()` | `steps.human_action()` |
 |---|---|---|---|
 | 필수 여부 | 모든 스텝에 필수 — 없으면 state machine이 이 함수를 아예 모른다 | 선택 — "이 스텝은 모델이 결정한다"는 표시일 때만 추가로 얹는다 | 선택 — "이 스텝은 사람이 결정한다"는 표시일 때만 추가로 얹는다 |
 | 하는 일 | `next={...}`로 다음 스텝(라우팅) 결정 | 반환값이 `choices` 밖이면 즉시 차단 (라우팅은 모름) | 반환값의 `action`이 `choices` 밖이거나 그 action의 payload가 스키마를 어기면 즉시 차단 |
-| 등록 위치 | `registry._workflow_steps` | `registry._judged` (별도) | `registry._human_actions` (별도) |
+| 등록 위치 | 이 파일의 `WorkflowRegistry._steps` | 같은 인스턴스의 `._judged` (별도) | 같은 인스턴스의 `._human_actions` (별도) |
 | 왜 필요한가 | 파이프라인 그래프 자체를 코드로 고정하기 위해 | 모델 출력은 예측 불가능하므로 bounded 안전망이 필요해서 | 사람의 선택도 bounded해야 감사 가능하고, payload가 붙는 action은 그 구조까지 검증해야 해서 |
 
-코드가 직접 결정하는 스텝(`fetch_status`)은 `@workflow_step` 단독, 판단이 필요한 스텝은 `@workflow_step` + (`@judged` 또는 `@human_action`) 이중으로 붙는다 — 판단 데코레이터가 라우팅을 대신하는 게 아니라, `@workflow_step`의 라우팅 계약 위에 "이 값은 모델/사람이 만든 것"이라는 제약을 얹는 것뿐이다. `registry.validate()`가 "judged/human_action인데 workflow_step이 없는" 반쪽짜리 선언을 기동 시점에 바로 잡아내는 것도 이 관계(둘 다 workflow_step에 종속) 때문이다. 지금 `services/` 전체에서 실제로 쓰이는 건 `@human_action`(`manual_review`)뿐이고 `@judged`는 코드로는 남아있지만 등록된 서비스가 하나도 없다 — § 아래 "현재 스캐폴드의 한계" 참고.
+코드가 직접 결정하는 스텝(`fetch_status`)은 `steps.step()` 단독, 판단이 필요한 스텝은 `steps.step()` + (`steps.judged()` 또는 `steps.human_action()`) 이중으로 붙는다 — 판단 데코레이터가 라우팅을 대신하는 게 아니라, `step()`의 라우팅 계약 위에 "이 값은 모델/사람이 만든 것"이라는 제약을 얹는 것뿐이다. `WorkflowRegistry.validate()`가 "judged/human_action인데 step이 없는" 반쪽짜리 선언을 그 파일 import 시점에 바로 잡아내는 것도 이 관계(둘 다 step에 종속) 때문이다. 지금 `services/` 전체에서 실제로 쓰이는 건 `steps.human_action()`(`manual_review`)뿐이고 `steps.judged()`는 코드로는 남아있지만 등록된 서비스가 하나도 없다 — § 아래 "현재 스캐폴드의 한계" 참고.
 
-### `registry/discovery.py` + `ToolRegistry.validate()` — auto-discovery와 일관성 검사
+**언제 `WorkflowRegistry`/`StateMachine`을 아예 생략하는가.** `weather`/`applicant_list`는 원래 이 절의 패턴대로 `steps = WorkflowRegistry()` + `steps.step(order=1, next={"완료": "DONE"})` 하나만 등록해서 썼는데, 이건 순수 의례(ceremony)였다 — 분기도 재시도도 판단 노드도 없이 "어댑터 한 번 부르고 끝"이라 `next`/`entry`/`StateMachine.run()`이 어떤 실제 결정도 안 하고 그냥 함수 호출 하나를 대신 전달하기만 했다. 그래서 이 둘은 `WorkflowRegistry`/`StateMachine`을 걷어내고 `@tool` 함수 본문에서 어댑터를 직접 호출하도록 되돌렸다:
+```python
+@tool(name="weather", description="...")
+@guardrail(output_schema=WEATHER_OUTPUT_SCHEMA)
+def weather(location: str) -> dict[str, Any]:
+    return WeatherAdapter().execute(location=location)
+```
+기준은 **분기(`next`가 outcome에 따라 갈리는가)·재시도(`max_retries`)·판단 노드(`judged`/`human_action`)가 하나라도 있는가**다. 하나라도 있으면 `WorkflowRegistry`가 실제로 일(그래프 고정, bounded 강제)을 하므로 그대로 쓴다(`subscription_status`가 셋 다 있음). 셋 다 없으면 `StateMachine`은 "step 하나 부르고 바로 DONE"만 반복하는 빈 껍데기이므로 안 쓴다. `subscription_weather_flow`는 분기/재시도/판단은 없지만 **두 tool 호출 사이의 순서와 데이터 의존관계**(region → location) 자체가 코드 로직이라 `WorkflowRegistry`를 유지했다 — 이 기준은 "스텝이 몇 개인가"가 아니라 "그 사이에 실제로 코드가 결정할 게 있는가"임에 유의.
+
+이 변경으로 로그의 `state machine start`/`span(kind="step")` 한 단계가 `weather`/`applicant_list`에서는 더 이상 안 찍힌다 — 어차피 `Orchestrator.handle()`이 찍는 tool 단위 span(`span(kind="tool")`)과 1:1이었던 정보라 손실은 없다(§ 아래 "로깅" 절).
+
+### `registry/discovery.py` + 두 단계 일관성 검사 — auto-discovery
 `main.py`가 서비스를 일일이 알 필요가 없게 만드는 지점. Python은 모듈을 실제로 import하기 전까진 그 안의 데코레이터를 실행하지 않으므로, 등록이 일어나려면 누군가는 각 `services/<name>/workflow.py`를 import해야 한다 — `discover_services(services)`가 `pkgutil.iter_modules(services.__path__)`로 하위 패키지를 전부 찾아 그 `workflow.py`를 대신 import해준다.
 
-이렇게 등록을 "자동"으로 만들면 반쯤 구현된 서비스 폴더가 조용히 무시되거나(예: `@tool`을 하나도 등록 안 함), 다른 모듈이 등록한 step 이름을 가리키다 오타난 `next` 참조가 `StateMachine.run()` 시점(즉 실제 요청이 들어올 때)까지 숨어있을 위험이 커진다. 그래서 `main.py`는 `discover_services()` 직후 `registry.validate()`를 호출해 기동 시점에 바로 fail-fast한다. `ToolRegistry.validate()`가 검사하는 것:
-- 등록된 tool이 하나도 없으면 즉시 실패 (서비스 폴더는 있는데 아무것도 안 잡힌 상태)
-- 모든 `workflow_step.next`의 target이 `"DONE"`이거나 등록된 다른 step 이름이어야 함 (오타 탐지)
-- 모든 `@judged` 노드는 반드시 같은 이름으로 `@workflow_step`에도 등록돼 있어야 함 (이중 데코레이터 누락 탐지)
-- 모든 `@human_action` 노드도 같은 이유로 `@workflow_step`에 등록돼 있어야 하고, `payload_schemas`에 선언된 action 키는 전부 `choices` 안에 있어야 함 (payload_schemas 쪽 오탈자 탐지 — choices에 없는 action에 스키마를 선언해봐야 절대 검증되지 않는 죽은 선언이 되므로)
-- 모든 `@guardrail`은 실제로 그 tool의 함수 자체에 등록돼야 함 — `@guardrail`을 `@tool`보다 위(나중에 적용되게)에 잘못 쓰거나 함수 이름이 tool name과 다르면, `guardrail()` 데코레이터가 `func.__name__`으로 fallback하면서 엉뚱한 키에 등록되는 조용한 버그가 생기는데 이걸 잡아낸다
+일관성 검사는 이제 두 단계로 나뉜다.
+- **파일 단위, import 시점 즉시** — 각 `workflow.py` 하단의 `steps.validate()`(`WorkflowRegistry.validate()`)가 그 파일의 `next`/`judged`/`human_action` 참조 무결성을 검사한다. 이 파일 하나로 판단 가능한 검사라 다른 서비스를 기다릴 필요가 없다.
+- **전역 카탈로그 단위, discovery 이후 한 번** — `main.py`가 `discover_services()` 직후 `registry.validate()`(`ToolRegistry.validate()`)를 호출해 tool/guardrail 카탈로그를 검사한다:
+  - 등록된 tool이 하나도 없으면 즉시 실패 (서비스 폴더는 있는데 아무것도 안 잡힌 상태)
+  - 모든 `@guardrail`은 실제로 그 tool의 함수 자체에 등록돼야 함 — `@guardrail`을 `@tool`보다 위(나중에 적용되게)에 잘못 쓰거나 함수 이름이 tool name과 다르면, `guardrail()` 데코레이터가 `func.__name__`으로 fallback하면서 엉뚱한 키에 등록되는 조용한 버그가 생기는데 이걸 잡아낸다
 
 `discover_services()`도 자체적으로 한 단계 fail-fast한다: `services/<name>/`에 `workflow.py` 자체가 없으면 `ServiceConsistencyError`로 명확히 실패하고, `workflow.py`는 있지만 그 안에서 다른 import가 실패한 "진짜 버그"는 오진하지 않고 원래 예외 그대로 전파한다(`ModuleNotFoundError.name`으로 구분).
 
@@ -96,7 +129,9 @@ guides/legacy_adapter_guide.md ← 신규 서비스 추가 가이드
 
 `main.py`의 `build_orchestrator()`는 `OPENAI_API_KEY`가 있으면 `OpenAIRunner`(실제 모델에 tool 카탈로그를 주고 name 하나만 고르게 함)를, 없으면 `FirstMatchRunner`(요청 문자열에 tool 이름이 포함되는지만 검사하는 오프라인 스텁)를 `agent_runner`로 선택한다. 두 클래스 모두 `AgentRunner` Protocol만 구현하므로 `orchestrator.py` 자체는 어느 쪽을 쓰든 안 바뀐다 — 이 스위칭도 `main.py`(조립 지점)의 책임이다.
 
-**일시정지/재개.** `spec.func(**kwargs)` 실행 중 내부의 `@human_action` 노드가 `AwaitingHumanAction`을 던지면(§ 아래 "human-in-the-loop" 절), `handle()`은 이 예외를 그대로 죽게 두지 않고 `{"status": "awaiting_human_action", "tool": ..., "step": ..., "choices": [...], "context": ...}`를 정상 반환값으로 돌려준다 — 대화가 여기서 사람의 답을 기다리며 멈춘다는 뜻이다. 호출자가 사람의 답을 받으면 `Orchestrator.resume(tool_name, context, step, action)`을 불러 멈췄던 `step`부터 이어서 실행한다: `context["human_action"] = action`을 채운 뒤 `StateMachine(registry=self.registry, entry=step).run(context)`를 다시 돌린다 — `registry._workflow_steps`가 tool 구분 없이 하나의 전역 이름공간이라, entry만 바꿔서 아무 지점부터나 재진입할 수 있다는 점을 이용한다. `resume()`도 같은 `GuardrailChain`을 거치므로 최종 완료 시 output guardrail은 그대로 적용된다.
+**실제 운영 환경에서 발견·수정한 라우팅 버그.** `OpenAIRunner`로 실행 중 `"weather 조회해줘"`(location은 `kwargs`로 별도 전달) 요청이 모델의 `'NONE'` 응답으로 라우팅 실패했다. `DEBUG` 로그로 실제 프롬프트를 확인해보니, `weather`/`subscription_weather_flow`처럼 description에 "location 하나만 입력받는다" 식으로 필수 입력을 명시한 tool만 실패하고, 그런 문구가 없는 `subscription_status`/`applicant_list`는 정상 라우팅됐다 — 원인은 `common/orchestrator.md`의 "*description에 명시된 입력 스키마 밖의 것을 추측하지 마라*"/"*적합한 tool이 없으면 억지로 고르지 마라*" 규칙이, "요청 텍스트에 인자 값이 없다"를 "적합한 tool이 없다"로 모델이 오판하게 만든 것이었다. 실제로는 인자 값이 `kwargs`로 호출자가 별도로 채워주는 구조라(§ 위 흐름), 라우팅(어떤 tool의 의도에 맞는가)과 인자 채움(텍스트가 그 값을 담고 있는가)은 별개인데 프롬프트가 이 둘을 구분하지 못했던 것. `common/orchestrator.md`에 "요청 텍스트에 tool의 입력 인자 값이 구체적으로 적혀 있지 않아도 된다 — 그 값은 호출자가 별도로 채워 넣는다"는 규칙을 한 줄 추가해 해결했다 — 오늘의 `WorkflowRegistry` 리팩터와는 무관한, 원래부터 있던 라우팅 프롬프트 설계의 갭이었다.
+
+**일시정지/재개.** `spec.func(**kwargs)` 실행 중 내부의 `@human_action` 노드가 `AwaitingHumanAction`을 던지면(§ 아래 "human-in-the-loop" 절), `handle()`은 이 예외를 그대로 죽게 두지 않고 `{"status": "awaiting_human_action", "tool": ..., "step": ..., "choices": [...], "context": ...}`를 정상 반환값으로 돌려준다 — 대화가 여기서 사람의 답을 기다리며 멈춘다는 뜻이다. 호출자가 사람의 답을 받으면 `Orchestrator.resume(tool_name, context, step, action)`을 불러 멈췄던 `step`부터 이어서 실행한다: `self.registry.tools()[tool_name].workflow_registry`로 그 tool 전용 `WorkflowRegistry`를 찾아(§ `workflow/registry.py` 절 — `@tool(workflow_registry=steps)`로 연결해둔 것), `context["human_action"] = action`을 채운 뒤 `StateMachine(registry=tool_spec.workflow_registry, entry=step).run(context)`를 다시 돌린다. `workflow_registry`가 없는 tool(`weather`처럼 pause가 없는 tool)에 `resume()`을 부르면 즉시 `ValueError`로 막는다. `resume()`도 같은 `GuardrailChain`을 거치므로 최종 완료 시 output guardrail은 그대로 적용된다.
 
 ### `harness/schema.py` — 스키마 검증 원시 요소
 `OptionalField`/`optional()`/`SchemaViolation`/`validate_schema()`가 여기 산다. 원래 `harness/guardrail.py` 안에 있던 걸, `@human_action`의 payload 검증(§ 아래 "human-in-the-loop" 절)이 똑같은 재귀 검증 로직을 필요로 하면서 공유 모듈로 뺐다 — guardrail도 human_action도 이 모듈에만 의존하고 서로는 모른다. `validate_schema(value, schema, path="")`가 스키마 값의 형태로 세 가지를 구분한다.
@@ -104,7 +139,7 @@ guides/legacy_adapter_guide.md ← 신규 서비스 추가 가이드
 - `{"choices": [...]}` → enum 제약
 - `{"choices": ...}`가 없는 순수 dict → **중첩 스키마**로 간주해 재귀 검증. 실패 시 `path`가 `subscription.status`처럼 점(dot) 경로로 어느 중첩 레벨에서 깨졌는지 보여준다.
 
-기본적으로 스키마에 선언된 키는 전부 필수지만, 조건부 경로에만 채워지는 필드는 `optional(schema)`(`OptionalField` wrapper)로 감싸 선언한다 — 필드가 없으면 통과, 있으면 `inner` 규칙으로 그대로 검증한다. 위반 시 `SchemaViolation(detail)`을 던지며, 호출자(`guardrail.py`/`registry.decorators.human_action`)가 각자의 맥락(`stage`/`tool_name` 또는 `human_action 이름`/`action`)을 붙여 자기 예외 타입(`GuardrailViolation`/`ValueError`)으로 다시 던진다.
+기본적으로 스키마에 선언된 키는 전부 필수지만, 조건부 경로에만 채워지는 필드는 `optional(schema)`(`OptionalField` wrapper)로 감싸 선언한다 — 필드가 없으면 통과, 있으면 `inner` 규칙으로 그대로 검증한다. 위반 시 `SchemaViolation(detail)`을 던지며, 호출자(`guardrail.py`/`workflow.registry.WorkflowRegistry.human_action`)가 각자의 맥락(`stage`/`tool_name` 또는 `human_action 이름`/`action`)을 붙여 자기 예외 타입(`GuardrailViolation`/`ValueError`)으로 다시 던진다.
 
 ### `harness/guardrail.py` — 개입 권한을 가진 검증
 `GuardrailChain.run()`은 `registry.guardrail_for(tool_name)`으로 선언을 읽어 input → 호출 → output 순으로 검증한다. **엔진 코드 어디에도 tool 이름이 하드코딩되지 않는다** — `if tool_name == ...` 분기가 생기면 안티패턴이라는 설계 원칙(`ai_framework_2.md`)이 그대로 구현된 지점. 실제 검증은 `harness/schema.py`의 `validate_schema()`에 위임하고, `_validate()`는 그 결과에 `stage`(input/output)·`tool_name`을 붙여 `GuardrailViolation`으로 감싸고 로깅만 담당한다(`subscription_status.workflow`의 `status`/`status_confidence`/`manual_review_decision` 필드, `subscription_weather_flow`의 중첩 검증이 실제 예시). 스키마 없음/통과는 `DEBUG`로, 위반은 예외를 던지기 직전 `ERROR`로 로깅한다.
@@ -115,9 +150,9 @@ guides/legacy_adapter_guide.md ← 신규 서비스 추가 가이드
 ### `harness/tracing.py` — 관측이자 로깅의 뼈대
 `Tracer`는 스택 기반으로 `Span`을 중첩시킨다. `start_trace`가 루트(kind="orchestrator")를 열고, `span()` 호출마다 현재 스택 최상단의 자식으로 붙는다. Tool이 늘어나도 상위 구조(Trace → Orchestrator Span → Tool Span*)는 그대로 유지된다는 설계가 스택 구현으로 자연히 보장됨.
 
-각 `start_trace`/`span` 진입·종료 시점에 `INFO` 레벨로 로그를 찍고, 중첩 깊이(`len(self._stack)`)만큼 들여쓰기를 붙인다 — `Trace`/`Span` 객체(`tracer.current_trace`)는 원래도 만들어지고 있었지만 그걸 읽어서 보여주는 코드가 어디에도 없었던 게 실제 gap이었다(§ 로깅 절 참고). `workflow/state_machine.py`가 각 `@workflow_step` 실행을 `tracer.span(kind="step")`으로 감싸면서, tool 단위보다 한 단계 더 세밀한 "이 tool 안에서 지금 어느 스텝을 도는지"까지 같은 메커니즘으로 로그에 잡힌다.
+각 `start_trace`/`span` 진입·종료 시점에 `INFO` 레벨로 로그를 찍고, 중첩 깊이(`len(self._stack)`)만큼 들여쓰기를 붙인다 — `Trace`/`Span` 객체(`tracer.current_trace`)는 원래도 만들어지고 있었지만 그걸 읽어서 보여주는 코드가 어디에도 없었던 게 실제 gap이었다(§ 로깅 절 참고). `workflow/state_machine.py`가 각 `steps.step()` 실행을 `tracer.span(kind="step")`으로 감싸면서, tool 단위보다 한 단계 더 세밀한 "이 tool 안에서 지금 어느 스텝을 도는지"까지 같은 메커니즘으로 로그에 잡힌다 — 단, `weather`/`applicant_list`처럼 `StateMachine`을 아예 안 쓰는 tool은 이 "step" span 없이 tool 단위 span까지만 찍힌다(§ 위 "언제 WorkflowRegistry를 생략하는가" 참고).
 
-`span()`은 활성 trace가 없는 상태(예: 오케스트레이터를 거치지 않고 `weather(location=...)`처럼 tool 함수를 직접 호출·테스트하는 경우)에도 안전하게 동작한다 — 스택이 비어 있으면 이름 없는 암묵적 루트를 하나 열어서 쓰고, 빠져나갈 때 다시 비운다. `StateMachine.run()`이 항상 `span()`을 쓰게 되면서 이 케이스를 처음부터 고려해야 했다.
+`span()`은 활성 trace가 없는 상태(예: 오케스트레이터를 거치지 않고 `subscription_status(applicant_id=...)`처럼 `StateMachine`을 쓰는 tool 함수를 직접 호출·테스트하는 경우)에도 안전하게 동작한다 — 스택이 비어 있으면 이름 없는 암묵적 루트를 하나 열어서 쓰고, 빠져나갈 때 다시 비운다. `StateMachine.run()`이 항상 `span()`을 쓰게 되면서 이 케이스를 처음부터 고려해야 했다.
 
 ### `prompts/store.py` — 프롬프트 계층
 `common_prompt()` (공통) + `tool_prompt()` (도메인별, `services/<name>/prompts/<tool_name>.md`) + 선택적 few-shot을 `compose()`가 `---`로 이어붙인다. 오케스트레이터는 `common_prompt()`만 써서 `OpenAIRunner.choose_tool()`에 넘긴다. `compose()` + `framework.llm.openai_client.complete()` 조합(도메인별 judged 노드가 실제로 모델을 호출하는 배선)은 원래 `manual_review`가 살아있는 예시였는데, `manual_review`가 사람 판단(`@human_action`)으로 바뀌면서 지금은 이 조합을 실제로 쓰는 서비스가 없다 — 당시 전용이던 `services/subscription_status/prompts/manual_review.md`는 완전히 죽은 파일이라 삭제했고, `compose()`/`complete()` 자체는 재사용 가능한 프레임워크 능력이라 남겨뒀다 (§ 아래 "현재 스캐폴드의 한계" 참고). `complete()` 자체는 모델/프롬프트 길이·응답 미리보기를 `INFO`로, system/user 프롬프트 원문 전체를 `DEBUG`로 로깅한다 — 프롬프트에 개인정보가 실릴 수 있는 서비스라면 운영 환경에서 `LOG_LEVEL=DEBUG`를 켜지 않도록 주의.
@@ -129,26 +164,30 @@ guides/legacy_adapter_guide.md ← 신규 서비스 추가 가이드
 `BaseAdapter`는 `call()`(프로토콜적 면 — 레거시 스펙에 종속)과 `normalize()`(의미론적 면 — `SemanticMapping`에 종속)를 분리해 각각 독립적으로 오버라이드하게 강제한다. `execute()`는 `normalize(call())`로 둘을 합성만 한다 — 이 한 곳에서 `call()`/`normalize()` 각각의 입출력을 `DEBUG`로 로깅하므로, 어떤 어댑터를 새로 만들어도(레거시 원시값 로깅을) 따로 구현할 필요가 없다.
 
 ### `workflow/state_machine.py` — 고정 파이프라인 실행기
-`StateMachine.run()`은 `entry`부터 시작해 `WorkflowStepSpec.func(context)`가 반환한 outcome 문자열을 `next` dict에서 찾아 다음 단계로 이동한다. `next_step == current`(자기 자신으로 순환)면 `retries` 카운터를 올리고 `max_retries` 초과 시 `MaxRetriesExceeded`. `next`가 없거나 `TERMINAL("DONE")`이면 종료. 판단 노드도 그냥 하나의 `workflow_step`으로 등록되며(`@judged`/`@human_action` + `@workflow_step` 이중 데코레이터), state machine 입장에서는 outcome이 code-driven이든 model-driven이든 human-driven이든 구분하지 않는다 — bounded choices라는 계약만 `@judged`/`@human_action`이 보장한다. 각 스텝 실행을 `tracer.span(name=현재_step, kind="step")`으로 감싸고, 진입("state machine start")·전이("step 'X' -> outcome=... -> next='Y'")·종료를 `INFO`로 로깅한다.
+`StateMachine.run()`은 `entry`부터 시작해 `WorkflowStepSpec.func(context)`가 반환한 outcome 문자열을 `next` dict에서 찾아 다음 단계로 이동한다. `next_step == current`(자기 자신으로 순환)면 `retries` 카운터를 올리고 `max_retries` 초과 시 `MaxRetriesExceeded`. `next`가 없거나 `TERMINAL("DONE")`이면 종료. 판단 노드도 그냥 하나의 step으로 등록되며(`steps.judged()`/`steps.human_action()` + `steps.step()` 이중 데코레이터), state machine 입장에서는 outcome이 code-driven이든 model-driven이든 human-driven이든 구분하지 않는다 — bounded choices라는 계약만 `judged()`/`human_action()`이 보장한다. 각 스텝 실행을 `tracer.span(name=현재_step, kind="step")`으로 감싸고, 진입("state machine start")·전이("step 'X' -> outcome=... -> next='Y'")·종료를 `INFO`로 로깅한다.
 
-`outcome`이 `next`의 키 밖인지 확인하는 검증은 여기 없다 — `@workflow_step`의 wrapper(`registry/decorators.py`)가 함수 반환 즉시 검사해서 `ValueError`를 던지므로, `run()`이 `spec.next[outcome]`을 인덱싱하는 시점엔 `outcome`이 항상 유효한 키임이 보장된다(`@judged`/`@human_action`이 각자의 bounded 값 밖을 함수 반환 즉시 막는 것과 동일한 위치·방식). 이 즉시 검증 덕분에 `services/subscription_status/workflow.py`의 실제 버그(`mapping.json`의 `"10"→"접수완료"`가 `fetch_status`의 `next`에는 빠져 있던 것)를 테스트 중 바로 잡아낼 수 있었다.
+`StateMachine.registry`는 전역 `ToolRegistry`가 아니라 `workflow.registry.WorkflowRegistry` 인스턴스다 — 각 서비스의 `build_state_machine()`이 자기 파일 전용 `steps`를 넘긴다(§ `workflow/registry.py` 절). 그래서 `steps()` 메서드가 보는 스텝 집합은 그 파일에 등록된 것으로 자연히 한정된다.
+
+`outcome`이 `next`의 키 밖인지 확인하는 검증은 여기 없다 — `steps.step()`의 wrapper(`workflow/registry.py`)가 함수 반환 즉시 검사해서 `ValueError`를 던지므로, `run()`이 `spec.next[outcome]`을 인덱싱하는 시점엔 `outcome`이 항상 유효한 키임이 보장된다(`judged()`/`human_action()`이 각자의 bounded 값 밖을 함수 반환 즉시 막는 것과 동일한 위치·방식). 이 즉시 검증 덕분에 `services/subscription_status/workflow.py`의 실제 버그(`mapping.json`의 `"10"→"접수완료"`가 `fetch_status`의 `next`에는 빠져 있던 것)를 테스트 중 바로 잡아낼 수 있었다.
 
 **`AwaitingHumanAction` — 일시정지.** `spec.func(context)` 호출이 이 예외를 던지면(§ 아래 "human-in-the-loop" 절), `run()`은 이를 에러가 아니라 정상적인 일시정지 신호로 취급한다: 예외 객체에 `step`(현재 step 이름)과 `context`(그 시점까지의 실행 상태)를 채워 넣고 그대로 다시 던진다 — raise한 쪽(예: `manual_review`)은 자기 step 이름을 몰라도 되고, `StateMachine`이 그 자리에서 알아서 채워준다. `retries`/`max_retries` 카운터는 건드리지 않으므로, 나중에 사람의 답을 받아 같은 step에 재진입해도 재시도 횟수로 잘못 소모되지 않는다.
 
-### human-in-the-loop — `@human_action` + `AwaitingHumanAction` + `Orchestrator.resume()`
+### human-in-the-loop — `steps.human_action()` + `AwaitingHumanAction` + `Orchestrator.resume()`
 "사람의 의사결정이 필요하면 action 목록을 보여주고 고르게 해야 한다"는 요구가 `manual_review`에 실제로 배선된 지점이다. 세 조각으로 나뉜다.
 
-- **`registry.decorators.human_action(choices, payload_schemas=None)`** — `@judged`와 계약(bounded choices)은 같지만 판단 주체가 모델이 아니라 사람이다. 함수는 `context`에 사람의 답이 이미 있으면(`context.get("human_action")`) `{"action": <choices 중 하나>, **payload}` 형태의 dict를 반환하고, 없으면 `AwaitingHumanAction(choices=...)`을 던진다. `action`은 여전히 유한 집합(bounded)이어야 감사 가능하다는 원칙(`ai_framework_2.md`의 judged branch 정의)을 그대로 유지하면서, action별로 다른 payload가 필요한 경우(예: `manual_review`의 `"서류추가요청"`이 어떤 서류가 더 필요한지 담아야 하는 것)는 `payload_schemas={"서류추가요청": {"field": Any}}`처럼 action에 종속된 스키마를 따로 선언해 `harness.schema.validate_schema()`로 검증한다. 이 분리가 핵심이다 — **action의 종류는 닫혀 있고(bounded), 그 안의 세부 데이터만 구조화**되므로 자유 라우팅과 구분되는 judged branch의 안전성이 그대로 유지된다.
+- **`WorkflowRegistry.human_action(choices, payload_schemas=None)`** — `judged()`와 계약(bounded choices)은 같지만 판단 주체가 모델이 아니라 사람이다. 함수는 `context`에 사람의 답이 이미 있으면(`context.get("human_action")`) `{"action": <choices 중 하나>, **payload}` 형태의 dict를 반환하고, 없으면 `AwaitingHumanAction(choices=...)`을 던진다. `action`은 여전히 유한 집합(bounded)이어야 감사 가능하다는 원칙(`ai_framework_2.md`의 judged branch 정의)을 그대로 유지하면서, action별로 다른 payload가 필요한 경우(예: `manual_review`의 `"서류추가요청"`이 어떤 서류가 더 필요한지 담아야 하는 것)는 `payload_schemas={"서류추가요청": {"field": Any}}`처럼 action에 종속된 스키마를 따로 선언해 `harness.schema.validate_schema()`로 검증한다. 이 분리가 핵심이다 — **action의 종류는 닫혀 있고(bounded), 그 안의 세부 데이터만 구조화**되므로 자유 라우팅과 구분되는 judged branch의 안전성이 그대로 유지된다.
 - **`workflow.state_machine.AwaitingHumanAction`** — 위에서 설명한 일시정지 신호. `manual_review`는 raise만 하고, `StateMachine.run()`이 `step`/`context`를 채워 넣는다.
-- **`orchestrator.Orchestrator.handle()`/`resume()`** — `handle()`은 이 예외를 받으면 크래시 대신 `{"status": "awaiting_human_action", "tool": ..., "step": ..., "choices": [...], "context": ...}`를 반환한다. 사람의 답이 오면 호출자가 `resume(tool_name, context, step, action)`을 불러 `context["human_action"] = action`을 채우고 `StateMachine(registry=self.registry, entry=step).run(context)`로 멈췄던 지점부터 재개한다.
+- **`orchestrator.Orchestrator.handle()`/`resume()`** — `handle()`은 이 예외를 받으면 크래시 대신 `{"status": "awaiting_human_action", "tool": ..., "step": ..., "choices": [...], "context": ...}`를 반환한다. 사람의 답이 오면 호출자가 `resume(tool_name, context, step, action)`을 불러 `context["human_action"] = action`을 채우고, `tool_spec.workflow_registry`(`@tool(workflow_registry=steps)`로 연결된 이 tool 전용 `WorkflowRegistry`)를 써서 `StateMachine(registry=tool_spec.workflow_registry, entry=step).run(context)`로 멈췄던 지점부터 재개한다.
 
 `manual_review`의 실제 배선(`services/subscription_status/workflow.py`):
 ```python
+steps = WorkflowRegistry()
+
 MANUAL_REVIEW_CHOICES = ("승인", "반려", "서류추가요청")
 
 
-@workflow_step(order=2, next={"승인": "DONE", "반려": "DONE", "서류추가요청": "DONE"})
-@human_action(
+@steps.step(order=2, next={"승인": "DONE", "반려": "DONE", "서류추가요청": "DONE"})
+@steps.human_action(
     choices=MANUAL_REVIEW_CHOICES,
     payload_schemas={"서류추가요청": {"field": Any}},
 )
@@ -158,6 +197,11 @@ def manual_review(context: dict[str, Any]) -> dict[str, Any]:
         raise AwaitingHumanAction(choices=MANUAL_REVIEW_CHOICES)
     context["last_result"]["manual_review_decision"] = human_action_input
     return human_action_input
+
+
+steps.validate()
+
+# ... 최상위 @tool(subscription_status, workflow_registry=steps)가 이 steps를 Orchestrator.resume()에 연결한다
 ```
 전에는 이 지점에서 OpenAI에게 "자동승인/수동검토 중 뭘 고를지"를 대신 판단시켰다(`@judged` + `complete()`). "manual_review"라는 이름 자체가 "사람이 검토해야 하는 케이스"라는 뜻인데 정작 모델이 그 판단을 대신하고 있었던 게 원래의 모순이었고, 지금은 이름 그대로 실제 사람의 답을 기다린다.
 
@@ -182,12 +226,12 @@ bounded choices 밖의 값을 입력하면(`@human_action`이 던지는 `ValueEr
 `common/orchestrator.md`가 "하나의 요청이 여러 tool을 필요로 하면 ... 고정 서브 workflow(capability)로 등록되어 있는지 먼저 확인하라"고 지시하는 지점의 구현체. `Orchestrator.handle()`은 요청당 tool 하나만 고르므로(§`orchestrator.py`), 두 tool을 함께 써야 하는 요청은 에이전트가 즉석에서 두 번 호출하게 두지 않고 이렇게 **상위 capability 하나로 미리 고정**한다.
 
 - `registry`에 등록되는 다른 서비스와 달리 `adapter.py`/`mapping.json`이 없다 — 자신만의 레거시/외부 연동이 없고, 이미 등록된 `subscription_status()`/`weather()` **tool 함수를 그대로 호출**해서 결과를 합성만 한다.
-- `query_subscription` → `query_weather` 두 `@workflow_step`이 `next`로 고정 연결되며, `query_subscription`이 채운 `subscription_result["region"]`을 `query_weather`가 그대로 `weather(location=...)`의 입력으로 넘긴다 — 이게 두 서비스 사이의 실제 데이터 의존관계다.
+- `query_subscription` → `query_weather` 두 `steps.step()`이 `next`로 고정 연결되며, `query_subscription`이 채운 `subscription_result["region"]`을 `query_weather`가 그대로 `weather(location=...)`의 입력으로 넘긴다 — 이게 두 서비스 사이의 실제 데이터 의존관계다.
 - 내부에서 `subscription_status()`/`weather()`를 직접 호출하는 건 그 두 tool 각각의 `GuardrailChain.run()`(input 검증 포함)을 거치지 않는다는 뜻이다 — `subscription_status.workflow`가 내부적으로 `SubscriptionStatusAdapter`를 직접 호출하고 오케스트레이터의 개입 없이 결과를 합성하는 것과 동일한 "capability가 capability를 감싼다" 패턴이다.
 - 다만 output 쪽 **내용물 검증**은 우회되지 않는다. `subscription_weather_flow`의 guardrail은 `{"subscription": Any, "weather": Any}`처럼 존재 여부만 보는 대신, 각 서비스의 `workflow.py`가 노출하는 `SUBSCRIPTION_STATUS_OUTPUT_SCHEMA` / `WEATHER_OUTPUT_SCHEMA` 상수를 그대로 import해 `{"subscription": SUBSCRIPTION_STATUS_OUTPUT_SCHEMA, "weather": WEATHER_OUTPUT_SCHEMA}`로 중첩 선언한다(§ `harness/guardrail.py`의 중첩 스키마 검증). `_validate()`가 재귀적으로 내려가 `subscription.status`/`weather.condition` 같은 중첩 필드까지 enum·optional 규칙을 그대로 적용하므로, 조합 서비스를 오케스트레이터로 호출하는 경로에서는 결과적으로 내용 검증이 이뤄진다. 스키마를 두 tool 모듈에서 재사용하기 때문에 중복 선언 없이 단일 소스로 유지된다.
 
 ### 입력 없는 목록 조회 + 표 렌더링 — `services/applicant_list/workflow.py`
-청약 신청자 20명(스텁)과 각자의 진행 단계를 한 번에 보여주는 tool. 구조적으로는 `weather`와 같은 "단순 어댑터 서비스"(`adapter.py`/`mapping.json`/단일 스텝)이지만 두 가지가 다르다.
+청약 신청자 20명(스텁)과 각자의 진행 단계를 한 번에 보여주는 tool. 구조적으로는 `weather`와 같은 "단순 어댑터 서비스"(`adapter.py`/`mapping.json`, 분기 없어 `WorkflowRegistry` 생략)이지만 두 가지가 다르다.
 
 - **입력이 없다.** `@tool` 함수가 `applicant_list()`로 파라미터 0개 — `_infer_schema()`(`registry/decorators.py`)가 빈 `input_schema`를 추론하는 첫 사례다. 목록 전체를 고정 조회하는 tool은 라우팅에 필요한 인자가 없어도 된다는 걸 보여준다.
 - **`mapping.json`을 `subscription_status`와 공유하지 않고 따로 둔다.** 두 서비스가 같은 레거시 청약 시스템의 다른 API(목록 vs 상세)를 표현한다는 설정이라 값(코드→상태 5종)은 우연히 동일하지만, "서비스는 자기 매핑 자산을 스스로 갖는다"는 원칙(§ 신규 서비스 추가 가이드)을 그대로 따른다 — import로 공유하면 결합이 생기고, 두 API가 실제로는 다른 속도로 바뀔 수 있는 별개의 레거시 엔드포인트라는 전제와 맞지 않는다.
@@ -228,8 +272,9 @@ StateMachine.run() 계속 (entry 이후 manual_review 진입)
              "step": "manual_review", "choices": ["승인","반려","서류추가요청"], "context": {...}}
   ⋯ (사람이 다음 턴에 답을 고름: 예 {"action": "서류추가요청", "field": "소득증빙서류"}) ⋯
 orchestrator.resume("subscription_status", context, "manual_review", {"action": "서류추가요청", "field": "소득증빙서류"})
-  └─ context["human_action"] = {"action": "서류추가요청", "field": "소득증빙서류"}
-     └─ StateMachine(registry=registry, entry="manual_review").run(context)  — 멈췄던 지점부터 재개
+  └─ tool_spec = registry.tools()["subscription_status"]  → tool_spec.workflow_registry (= subscription_status.workflow.steps)
+     context["human_action"] = {"action": "서류추가요청", "field": "소득증빙서류"}
+     └─ StateMachine(registry=tool_spec.workflow_registry, entry="manual_review").run(context)  — 멈췄던 지점부터 재개
           └─ manual_review(context) 재호출 — 이번엔 context["human_action"]이 있음
                → @human_action이 action("서류추가요청")을 choices로, payload({"field":...})를
                  payload_schemas["서류추가요청"]으로 검증 (밖이면 ValueError)
@@ -240,15 +285,14 @@ orchestrator.resume("subscription_status", context, "manual_review", {"action": 
      있다면 존재만 확인(Any — 세부 검증은 이미 @human_action이 끝냄)
 ```
 
-나머지 두 tool은 같은 골격(라우팅 → guardrail → tool 함수 → StateMachine)을 훨씬 짧게 탄다.
+나머지 두 tool은 같은 골격(라우팅 → guardrail → tool 함수)을 훨씬 짧게 탄다.
 
 ```
 orchestrator.handle("weather 조회해줘", location="Seoul")
   → weather(location="Seoul")   [services/weather/workflow.py]
-     └─ StateMachine(entry="fetch_weather").run(context)  — 분기/재시도 없음, 단일 스텝
-        └─ fetch_weather: WeatherAdapter().execute(location="Seoul")
-             ├─ call()      → 지오코딩(도시명→좌표) + Open-Meteo 현재 날씨 실 호출
-             └─ normalize() → mapping.json(WMO code) 조회 → {"condition": "대체로 맑음", ...}
+     └─ WeatherAdapter().execute(location="Seoul")  — 분기/재시도가 없어 WorkflowRegistry/StateMachine 없이 직접 호출
+          ├─ call()      → 지오코딩(도시명→좌표) + Open-Meteo 현재 날씨 실 호출
+          └─ normalize() → mapping.json(WMO code) 조회 → {"condition": "대체로 맑음", ...}
 
 orchestrator.handle("subscription_weather_flow 조회해줘", applicant_id="A123")
   → subscription_weather_flow(applicant_id="A123")   [services/subscription_weather_flow/workflow.py]
@@ -287,7 +331,7 @@ INFO  agent_loop.orchestrator      | request done: tool=subscription_status resu
 INFO  agent_loop.tracing           | trace 6c80695b end   [orchestrator] orchestrator duration=0.001s
 ```
 
-`subscription_weather_flow`처럼 tool이 다른 tool을 직접 호출하는 경우, 안쪽 `subscription_status`/`weather`가 각자 여는 `state machine start`/`span`이 바깥쪽 `query_subscription`/`query_weather` 스텝 span 밑에 한 단계 더 들여써져서 나온다 — 합성 관계가 로그 들여쓰기 그대로 드러난다.
+`subscription_weather_flow`처럼 tool이 다른 tool을 직접 호출하는 경우, 안쪽 `subscription_status`가 여는 `state machine start`/`span`이 바깥쪽 `query_subscription` 스텝 span 밑에 한 단계 더 들여써져서 나온다 — 합성 관계가 로그 들여쓰기 그대로 드러난다. `weather`는 이제 자체 `StateMachine`이 없어 `query_weather` 스텝 span 밑에 별도 "state machine start" 없이 어댑터 호출 로그만 바로 붙는다.
 
 **알려진 한계**: `Tracer._stack`은 `Tracer` 싱글턴 하나가 공유하는 상태라 스레드 세이프하지 않다 — 지금 스캐폴드는 요청을 동기적으로 하나씩 처리하는 걸 전제로 하며, 나중에 요청을 동시에(멀티스레드/비동기) 처리하게 되면 이 부분을 `contextvars` 기반으로 바꿔야 한다.
 
@@ -301,9 +345,9 @@ INFO  agent_loop.tracing           | trace 6c80695b end   [orchestrator] orchest
 | Prompt Store (공통/도메인/few-shot 계층) | `prompts.store.PromptStore` |
 | 공통 하네스 — Input/Output Guardrail 체인 | `harness.guardrail.GuardrailChain` |
 | 공통 하네스 — Tracing | `harness.tracing.Tracer` |
-| 결정론적 분기/순환 | `registry.decorators.workflow_step(next=...)` + `workflow.state_machine.StateMachine` |
-| Judged branch (bounded choices, 판단 주체=모델) | `registry.decorators.judged(choices=...)` — 현재 등록된 서비스는 없음(§ 아래 한계) |
-| Human-in-the-loop judged branch (bounded choices + payload, 판단 주체=사람) | `registry.decorators.human_action(choices=..., payload_schemas=...)` + `workflow.state_machine.AwaitingHumanAction` + `orchestrator.Orchestrator.resume()` |
+| 결정론적 분기/순환 | `workflow.registry.WorkflowRegistry.step(next=...)`(파일마다 로컬 인스턴스) + `workflow.state_machine.StateMachine` |
+| Judged branch (bounded choices, 판단 주체=모델) | `workflow.registry.WorkflowRegistry.judged(choices=...)` — 현재 등록된 서비스는 없음(§ 아래 한계) |
+| Human-in-the-loop judged branch (bounded choices + payload, 판단 주체=사람) | `workflow.registry.WorkflowRegistry.human_action(choices=..., payload_schemas=...)` + `workflow.state_machine.AwaitingHumanAction` + `orchestrator.Orchestrator.resume()`(tool별 `workflow_registry`로 재개) |
 | confirmed/inferred 매핑 관리 | `semantic.mapping.SemanticMapping` / `MappedValue` |
 | 미확인 값 fail-fast | `semantic.mapping.UnmappedValueError` |
 | 도메인 흐름 전체를 하나의 capability로 등록 | `services/subscription_status/workflow.py`의 최상위 `@tool subscription_status` (내부 state machine을 감싸 단일 tool로 노출) |
@@ -311,7 +355,7 @@ INFO  agent_loop.tracing           | trace 6c80695b end   [orchestrator] orchest
 | 사람에게 action 목록을 보여주고 고르게 하는 실제 배선 | `services/subscription_status/workflow.py`의 `manual_review()` — `@human_action` + `AwaitingHumanAction`으로 일시정지, `Orchestrator.resume()`으로 재개 |
 | 여러 tool을 고정 서브 workflow로 미리 묶기 (에이전트가 즉석에서 여러 tool을 잇지 않게) | `services/subscription_weather_flow/workflow.py`의 최상위 `@tool subscription_weather_flow` — `subscription_status()` → `weather()` 순차 호출, `region` 필드로 데이터 연결 |
 | 서비스 auto-discovery + 기동 시점 일관성 검사 | `registry.discovery.discover_services()` + `registry.decorators.ToolRegistry.validate()` |
-| Optional 필드 + 중첩 스키마 검증 (조합 서비스의 하위 tool 결과까지 boundary에서 검증) | `harness.schema.optional()`(`OptionalField`) + `validate_schema()`의 재귀 검증 — `harness.guardrail`과 `registry.decorators.human_action`이 공유, `services/subscription_weather_flow/workflow.py`가 `SUBSCRIPTION_STATUS_OUTPUT_SCHEMA`/`WEATHER_OUTPUT_SCHEMA`를 재사용 |
+| Optional 필드 + 중첩 스키마 검증 (조합 서비스의 하위 tool 결과까지 boundary에서 검증) | `harness.schema.optional()`(`OptionalField`) + `validate_schema()`의 재귀 검증 — `harness.guardrail`과 `workflow.registry.WorkflowRegistry.human_action`이 공유, `services/subscription_weather_flow/workflow.py`가 `SUBSCRIPTION_STATUS_OUTPUT_SCHEMA`/`WEATHER_OUTPUT_SCHEMA`를 재사용 |
 | 레벨 조절 가능한 단계별 로깅 | `harness.logging_setup.configure_logging()`(`LOG_LEVEL`) + `harness.tracing.Tracer`(trace/span을 로그로도 출력) |
 | 입력 없는 tool + 결정론적 데이터 의존관계가 없어 별도 tool로 남긴 "목록 → 상세" 패턴 | `services/applicant_list/workflow.py`의 최상위 `@tool applicant_list()` — 표(`table`) 렌더링까지 조립, `subscription_status`로의 후속 조회는 프롬프트로만 안내(§ 위 "입력 없는 목록 조회" 절) |
 
@@ -319,14 +363,16 @@ INFO  agent_loop.tracing           | trace 6c80695b end   [orchestrator] orchest
 
 두 카테고리가 있다 — 어느 쪽이든 `framework/`도 `main.py`도 손대지 않는 게 목표이고, `discover_services()`(auto-discovery) 덕분에 실제로 그렇게 됐다. `services/<name>/`에 파일을 놓기만 하면 다음 실행 때 `registry.validate()`가 등록/참조 무결성까지 자동으로 확인해준다.
 
-**레거시/외부 어댑터 서비스** (`subscription_status`, `weather`, `applicant_list`) — `guides/legacy_adapter_guide.md` 체크리스트 기준, 아래 4개 파일만 새로 만든다.
+**레거시/외부 어댑터 서비스** (`subscription_status`, `weather`, `applicant_list`) — `guides/legacy_adapter_guide.md` 체크리스트 기준, 아래 4개 파일만 새로 만든다. `workflow.py`의 모양은 분기/재시도/판단 노드가 있느냐에 따라 갈린다(§ 위 "언제 WorkflowRegistry/StateMachine을 아예 생략하는가").
 - `services/<name>/adapter.py` (`BaseAdapter` 상속)
 - `services/<name>/mapping.json`
-- `services/<name>/workflow.py` (`@workflow_step`/`@judged`(모델 판단) 또는 `@human_action`(사람 판단)/`@tool`)
+- `services/<name>/workflow.py`
+  - 분기/재시도/판단 노드가 하나도 없으면(`weather`, `applicant_list`): `WorkflowRegistry` 없이 최상위 `@tool` 함수 안에서 어댑터를 직접 호출
+  - 하나라도 있으면(`subscription_status`): `steps = WorkflowRegistry()` + `steps.step()`/`steps.judged()`(모델 판단) 또는 `steps.human_action()`(사람 판단) + 최상위 `@tool`
 - `services/<name>/prompts/<tool_name>.md`
 
 **조합 서비스** (`subscription_weather_flow`) — 자신만의 외부 연동이 없으므로 `adapter.py`/`mapping.json`은 만들지 않는다.
-- `services/<name>/workflow.py` (이미 등록된 다른 tool 함수를 직접 호출해 `@workflow_step`으로 연결 + 최상위 `@tool`)
+- `services/<name>/workflow.py` (이미 등록된 다른 tool 함수를 직접 호출해 자기 전용 `steps = WorkflowRegistry()`의 `steps.step()`으로 연결 + 최상위 `@tool`)
 - `services/<name>/prompts/<tool_name>.md`
 
 두 카테고리 모두 `services/<name>/workflow.py`라는 파일명은 고정이다 — `discover_services()`가 정확히 이 이름을 import하기 때문(§ `registry/discovery.py`).
@@ -337,12 +383,14 @@ INFO  agent_loop.tracing           | trace 6c80695b end   [orchestrator] orchest
 - `WeatherAdapter`는 Open-Meteo(무료, 인증 불필요)를 쓰므로 `weather` 서비스는 `.env`에 키를 넣지 않아도 바로 호출 가능 — 처음에 RapidAPI "yahoo-weather5"(키 필요)로 만들었다가 인증 없는 샘플 테스트에 맞춰 교체함.
 - `requirements.txt`(openai/python-dotenv/requests)가 아직 이 환경에 설치되지 않음 — `pip install -r requirements.txt` 필요.
 - `OpenAIRunner`(tool 라우팅)는 `OPENAI_MODEL` 미지정 시 `gpt-4o-mini`로 기본 동작 — 실제 사용 가능한 모델명으로 `.env`에서 확정해야 함. `manual_review`는 더 이상 OpenAI를 호출하지 않으므로(사람 판단으로 전환) 이 항목과 무관해졌다.
-- `@judged`(모델이 판단하는 judged branch)는 데코레이터·`registry.validate()` 검사·문서까지 다 갖춰져 있지만, `manual_review`가 `@human_action`(사람 판단)으로 전환되면서 지금 `services/` 전체에서 실제로 이 데코레이터를 쓰는 서비스가 하나도 없다 — `framework/prompts/store.py`의 `compose()` + `framework/llm/openai_client.py`의 `complete()` 조합도 같이 orphan됨. **정리 여부**: 이 조합에 실제로 종속돼 있던 서비스별 산출물, 즉 `services/subscription_status/prompts/manual_review.md`(당시 OpenAI에게 자동승인/수동검토를 판단시키던 프롬프트)는 완전히 죽은 파일이라 삭제했다. 반면 `@judged` 데코레이터·`registry.validate()`의 judged 검사·`PromptStore.compose()`·`framework/llm/openai_client.py`는 특정 서비스에 종속된 게 아니라 재사용 가능한 프레임워크 능력이라 그대로 남겨뒀다 — 다음에 "사람이 아니라 모델이 판단해야 하는" judged 노드가 생기면 그때 다시 살아있는 예시가 생긴다.
-- `@human_action`/`AwaitingHumanAction`/`Orchestrator.resume()`으로 만든 human-in-the-loop 일시정지/재개는 `subscription_status`라는 단일 사례로만 검증됐다. `Orchestrator.resume()`은 tool이 `context["last_result"]`를 그대로 반환한다는 관례에 기대므로 `subscription_weather_flow`처럼 자체적으로 반환값을 조립하는 tool에는 아직 쓸 수 없고, 세션 영속화 계층이 없어 paused response의 `context`를 호출자가 프로세스 메모리 안에서 직접 들고 있다가 넘겨야 한다(재시작하면 유실).
+- `steps.judged()`(모델이 판단하는 judged branch)는 메서드·`WorkflowRegistry.validate()` 검사·문서까지 다 갖춰져 있지만, `manual_review`가 `steps.human_action()`(사람 판단)으로 전환되면서 지금 `services/` 전체에서 실제로 이 메서드를 쓰는 서비스가 하나도 없다 — `framework/prompts/store.py`의 `compose()` + `framework/llm/openai_client.py`의 `complete()` 조합도 같이 orphan됨. **정리 여부**: 이 조합에 실제로 종속돼 있던 서비스별 산출물, 즉 `services/subscription_status/prompts/manual_review.md`(당시 OpenAI에게 자동승인/수동검토를 판단시키던 프롬프트)는 완전히 죽은 파일이라 삭제했다. 반면 `steps.judged()`·`WorkflowRegistry.validate()`의 judged 검사·`PromptStore.compose()`·`framework/llm/openai_client.py`는 특정 서비스에 종속된 게 아니라 재사용 가능한 프레임워크 능력이라 그대로 남겨뒀다 — 다음에 "사람이 아니라 모델이 판단해야 하는" judged 노드가 생기면 그때 다시 살아있는 예시가 생긴다.
+- `steps.human_action()`/`AwaitingHumanAction`/`Orchestrator.resume()`으로 만든 human-in-the-loop 일시정지/재개는 `subscription_status`라는 단일 사례로만 검증됐다. `Orchestrator.resume()`은 tool이 `context["last_result"]`를 그대로 반환한다는 관례에 기대므로 `subscription_weather_flow`처럼 자체적으로 반환값을 조립하는 tool에는 아직 쓸 수 없고, 세션 영속화 계층이 없어 paused response의 `context`를 호출자가 프로세스 메모리 안에서 직접 들고 있다가 넘겨야 한다(재시작하면 유실).
+- **미해결 논의 — LangGraph의 checkpointer식 영속화가 필요한가.** 위 항목의 근본 원인은 "멈춘 상태를 프로세스 메모리 밖(DB 등)에 저장했다가, 나중에 다른 프로세스/다른 시점에서도 정확히 그 지점부터 재개한다"는 기능 자체가 없다는 것이다. LangGraph의 checkpointer가 하는 일과 비교하며 논의했는데, `manual_review`가 대표하는 실제 업무(사람이 서류를 몇 시간~며칠 걸려 검토)를 생각하면 이 갭은 실재한다는 데는 동의했다. **아직 구현하지 않음** — 세션 저장소 종류(파일/Redis/DB)와 배포 형태(단일 프로세스 유지 vs 여러 워커로 분산)가 안 정해진 채로 먼저 만들면 나중에 실제 요구사항이 드러났을 때 다시 뜯어고칠 위험이 크다는 판단. 실제로 필요해지는 신호는 (1) 사람이 몇 시간/며칠 뒤에 승인·반려하는 실제(모의가 아닌) 시나리오가 생기는가, (2) 그 사이 서버 재시작이나 여러 인스턴스 분산 배포가 실제로 필요한가 — 이 둘 중 하나라도 나타나면 그때 checkpointer 스타일 영속화를 설계한다.
 - human_action의 action은 여전히 "라벨 + payload"로만 끝난다 — action이 실제로 다른 capability를 호출·연결하는 것(예: `"서류추가요청"`이 서류 재제출 처리 tool로 실제 핸드오프하는 것)은 의도적으로 미룬 범위다. 실제로 연결할 대상 capability가 생기면 그때 실행 로직을 얹기로 함(YAGNI로 미룬 것이지 빠뜨린 게 아님).
 - `main.py`의 `FirstMatchRunner`는 이름이 긴 tool부터 substring 매칭하도록 고쳤지만(한 tool 이름이 다른 tool 이름을 포함하는 경우 대비, 예: `weather` ⊂ `subscription_weather_flow`), 여전히 순수 문자열 포함 검사라 실제 자연어 요청 라우팅에는 쓸 수 없다 — 오프라인 샘플 테스트 전용 스텁이라는 원래 성격은 그대로.
-- `ToolRegistry.validate()`는 registry 내부 참조 무결성(step/judged/human_action/guardrail 연결)만 본다 — "adapter.py가 BaseAdapter를 상속했는가", "mapping.json이 실제로 존재하는가" 같은 파일 시스템/클래스 계층 검사나, "새 tool description이 기존 tool과 의미가 안 겹치는가" 같은 의미적 검사(`guides/legacy_adapter_guide.md` 체크리스트 항목)는 하지 않는다 — 이런 건 코드로 자동 판별하기 어려워 사람 리뷰 영역으로 남겨둠.
-- `@judged(choices=..., confidence_required="confirmed")`의 `confidence_required`는 `JudgedSpec`에 저장만 되고 실제로 어디서도 읽거나 검사하지 않는다 — "inferred 값은 judged 판단에 넘기면 안 된다"는 규칙은 지금 `fetch_status`가 `status_confidence != "confirmed"`를 직접 체크해서 우회 진입시키는 방식으로만 지켜지고, `@judged` 데코레이터 자체는 이 제약을 강제하지 않는 미완성 지점이다.
+- `ToolRegistry.validate()`(tool/guardrail 카탈로그)와 `WorkflowRegistry.validate()`(파일별 step/next/judged/human_action) 둘 다 참조 무결성만 본다 — "adapter.py가 BaseAdapter를 상속했는가", "mapping.json이 실제로 존재하는가" 같은 파일 시스템/클래스 계층 검사나, "새 tool description이 기존 tool과 의미가 안 겹치는가" 같은 의미적 검사(`guides/legacy_adapter_guide.md` 체크리스트 항목)는 하지 않는다 — 이런 건 코드로 자동 판별하기 어려워 사람 리뷰 영역으로 남겨둠.
+- **(해결됨, 참고로 남김)** 원래 `workflow_step`/`next`/`order`가 전역 `ToolRegistry`에 이름만으로 등록돼 있었다 — 다른 파일과 스텝 이름이 겹치면 조용히 덮어써지고, `next` 참조가 다른 서비스로 새는 것도 막을 방법이 없었고, `order`가 "이 workflow 안에서 몇 번째"라는 걸 전역에서는 표현할 수 없었다(같은 스텝이 여러 workflow에 다른 순서로 조합될 수 있으므로). `workflow/registry.py`의 `WorkflowRegistry`로 분리해 각 파일이 자기 전용 인스턴스를 갖게 하면서 세 문제 모두 구조적으로 해소됨(§ 위 `workflow/registry.py` 절). 다만 `WorkflowStepSpec.order`/`.source`는 지금도 여전히 저장만 되고 `StateMachine.run()`을 포함해 어디에서도 읽히지 않는 죽은 필드다 — 실행 순서는 순전히 `entry` + `next` 체인만으로 결정된다. 지금은 사람이 읽을 때(코드 리뷰) 실행 순서를 가늠하는 문서화 용도로만 쓰이며, 실제로 강제되는 값이 아니라는 점에 주의.
+- `steps.judged(choices=..., confidence_required="confirmed")`의 `confidence_required`는 `workflow.registry.JudgedSpec`에 저장만 되고 실제로 어디서도 읽거나 검사하지 않는다 — "inferred 값은 judged 판단에 넘기면 안 된다"는 규칙은 지금 `fetch_status`가 `status_confidence != "confirmed"`를 직접 체크해서 우회 진입시키는 방식으로만 지켜지고, `judged()` 자체는 이 제약을 강제하지 않는 미완성 지점이다.
 - `subscription_weather_flow`의 중첩 guardrail(§ 위 절)은 **output 내용물**만 boundary에서 검증한다 — 내부에서 직접 호출하는 `subscription_status()`/`weather()` 각각의 `GuardrailChain.run()`(input 검증 포함)은 여전히 우회된다. 지금은 두 tool 모두 input_schema를 선언하지 않아 우연히 gap이 드러나지 않을 뿐이므로, 나중에 어느 한쪽이 input_schema를 추가하면 조합 서비스 경로에서는 그 input 검증이 적용 안 된다는 점을 잊기 쉽다.
 - `ApplicantListAdapter.call()`은 20명 고정 스텁(하드코딩된 리스트) — 실제 레거시 목록 조회 API 연동 시 교체 필요. `applicant_list`와 `subscription_status`가 값은 동일하지만 서로 다른 `mapping.json`을 갖고 있어서(§ 위 "입력 없는 목록 조회" 절 — 의도적 설계), 실제로 상태 체계가 바뀌면 두 파일을 각각 갱신해야 한다는 걸 잊기 쉽다.
 - **미해결 논의 — 서비스 간 "겹치는 필드"를 어떻게 다룰지.** 위 항목의 근본 원인은 두 서비스의 output이 스키마 전체가 겹치는 것도 완전히 독립적인 것도 아니라, 일부 필드만 겹친다는 데 있다(`applicant_id`/`status`/`status_confidence`는 같은 도메인 개념이라 일치해야 하고, `region`/`manual_review_decision`/`name`은 각 서비스 고유). 스키마 전체를 합치거나 완전히 분리하는 이분법 대신, 겹치는 조각만 뽑아 공유 자산으로 만들고(예: 도메인을 대표하는 서비스가 `MAPPING_PATH`/상태 enum 상수를 export하고 다른 서비스가 그 조각만 import) 안 겹치는 필드는 각자 스키마에 남기는 방향으로 논의했다. 프레임워크 차원 규약(`"confirmed"/"inferred"` 같은 `SemanticMapping` 자체의 값)과 도메인 차원 지식(청약 상태 5종 같은 특정 서비스의 값)은 공유 주체가 다르다는 점(전자는 `framework/semantic/mapping.py`, 후자는 그 도메인을 대표하는 서비스)도 같이 짚었다. **아직 구현하지 않음** — 실제 use case(파라미터가 여럿이고 그중 일부만 겹치는 상황이 정확히 어떻게 발생할지)가 명확해지기 전까지는 의도적으로 보류.

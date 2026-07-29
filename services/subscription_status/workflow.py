@@ -3,12 +3,15 @@ from __future__ import annotations
 from typing import Any
 
 from framework.harness.guardrail import optional
-from framework.registry.decorators import guardrail, human_action, registry, tool, workflow_step
+from framework.registry.decorators import guardrail, tool
+from framework.workflow.registry import WorkflowRegistry
 from framework.workflow.state_machine import AwaitingHumanAction, StateMachine
 from services.subscription_status.adapter import SubscriptionStatusAdapter
 
+steps = WorkflowRegistry()  # 이 파일 전용 — 다른 서비스와 이름이 겹쳐도 충돌하지 않는다
 
-@workflow_step(
+
+@steps.step(
     order=1,
     source="legacy_subscription_system",
     max_retries=5,
@@ -36,8 +39,8 @@ MANUAL_REVIEW_CHOICES = ("승인", "반려", "서류추가요청")
 # 더 이상 말이 안 된다 — 사람이 실제로 내리는 결정(승인/반려)으로 바꿨다.
 
 
-@workflow_step(order=2, next={"승인": "DONE", "반려": "DONE", "서류추가요청": "DONE"})
-@human_action(
+@steps.step(order=2, next={"승인": "DONE", "반려": "DONE", "서류추가요청": "DONE"})
+@steps.human_action(
     choices=MANUAL_REVIEW_CHOICES,
     payload_schemas={"서류추가요청": {"field": Any}},
 )
@@ -51,8 +54,11 @@ def manual_review(context: dict[str, Any]) -> dict[str, Any]:
     return human_action_input
 
 
+steps.validate()  # 이 파일의 step/next/human_action 그래프만으로 즉시 검증 가능
+
+
 def build_state_machine() -> StateMachine:
-    return StateMachine(registry=registry, entry="fetch_status")
+    return StateMachine(registry=steps, entry="fetch_status")
 
 
 SUBSCRIPTION_STATUS_OUTPUT_SCHEMA = {
@@ -73,6 +79,7 @@ SUBSCRIPTION_STATUS_OUTPUT_SCHEMA = {
         "청약 신청자의 진행상황을 조회한다. 내부적으로 상태 재조회/재제출대기/"
         "수동검토까지 이어지는 고정 서브 workflow 전체를 하나의 capability로 실행한다."
     ),
+    workflow_registry=steps,  # manual_review가 pause할 수 있어 Orchestrator.resume()이 필요로 함
 )
 @guardrail(output_schema=SUBSCRIPTION_STATUS_OUTPUT_SCHEMA)
 def subscription_status(applicant_id: str) -> dict[str, Any]:

@@ -20,7 +20,7 @@ configure_logging()  # LOG_LEVEL 환경변수(기본 INFO) — discover_services
 FRAMEWORK_DIR = pathlib.Path(__file__).parent / "framework"
 
 discover_services(services)  # services/<name>/workflow.py를 전부 import해 등록 트리거
-registry.validate()  # 등록된 tool/workflow_step/judged/guardrail 사이 참조 무결성 검사
+registry.validate()  # 등록된 tool/guardrail 사이 참조 무결성 검사 (workflow_step/next는 각 파일이 import 시점에 자체 검증)
 
 
 class FirstMatchRunner:
