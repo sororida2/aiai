@@ -11,6 +11,7 @@
 - **LangGraph의 checkpointer식 영속화가 필요한가** — `Orchestrator.resume()`이 멈춘 상태를 프로세스 메모리로만 들고 있는 한계. 사람이 몇 시간~며칠 뒤에 판단하는 실제 시나리오나 분산 배포가 실제로 필요해지기 전까진 보류.
 - **병렬 분기(fan-out/join)가 필요한가** — `StateMachine`은 순차 실행만 지원. 의존관계 없는 두 호출을 동시에 불러야 할 만큼 느린 실제 사례가 나오기 전까진 보류.
 - **tool 본문에 `complete()`를 직접 호출하는 것의 트레이드오프** — bounded choices(감사 가능)를 포기하는 대신 완전히 자유로운 생성을 얻는 선택. 정형화가 원천적으로 불가능한 자유 텍스트 생성이 목적인 tool이 실제로 필요해지기 전까진 열어만 둠.
+- **`manual_review` 앞에 AI 기반 중요도 분류(triage)를 넣을지** — "덜 중요한 판단은 AI에게 위임"은 예전에 시도했다가 이름-행동 모순으로 되돌린 구조와 같아서, 다시 하려면 `triage`(AI, 중요도만 분류)와 `manual_review`(사람, 실제 결정)를 역할 분리해야 함. 사람에게 넘어가는 케이스 중 "AI가 걸러줬어도 됐을" 구체적 사례가 쌓이기 전까진 보류.
 
 ## 디렉토리 구조
 
@@ -248,6 +249,16 @@ bounded choices 밖의 값을 입력하면(`@human_action`이 던지는 `ValueEr
 - **최상위 `@tool` 함수가 표현(presentation)까지 조립한다.** `adapter.normalize()`는 의미 정규화(코드→값+confidence)까지만 하고, `applicant_list()`가 그 위에서 `_render_table()`로 마크다운 표 문자열을 만들어 `{"applicants": [...], "table": "..."}`로 반환한다 — 구조화된 데이터와 표 문자열을 같이 주는 이유는, 채팅 인터페이스에 그대로 얹었을 때 20행짜리 표가 실제로 읽을 만한지(이번 서비스를 추가한 실험 목적)를 그 자리에서 확인할 수 있게 하기 위해서다.
 - **"목록 → 상세" 두 단계는 하나의 capability로 묶지 않았다.** `subscription_weather_flow`(region 데이터를 다음 tool 입력으로 자동 전달)와 달리, `applicant_list`의 tool description은 "사용자가 특정 신청자를 지목하면 `subscription_status(applicant_id=...)`로 이어서 조회하라"고만 안내하고 실제 연결은 만들지 않았다 — 두 호출이 같은 요청 안에서 항상 함께 일어나는 게 아니라(목록만 보고 끝낼 수도 있음), 별개의 대화 턴에서 사용자가 고른 이름을 사람(또는 그 위의 agent 판단)이 applicant_id로 옮겨서 다음 요청을 만드는 구조이기 때문이다 — 이게 **고정 서브 workflow로 묶어야 하는 경우(subscription_weather_flow)와 개별 tool로 남겨야 하는 경우(applicant_list → subscription_status)를 가르는 기준**이다: 데이터 의존관계가 매 호출마다 결정론적으로 이어지면 묶고, 사람이 매번 다르게 골라야 하면 개별 tool로 남긴다.
 
+## 서비스-프레임워크 연결도
+
+지금 구현된 4개 서비스가 프레임워크의 어떤 조각에 실제로 연결되는지를 시각화한 다이어그램은 `agent_loop_architecture_diagrams.html`의 "8. 현재 구현된 서비스 ↔ 프레임워크 연결도" 절에 있다(SVG로 직접 그려서 마크다운 뷰어의 mermaid 렌더링 품질에 의존하지 않음 — 브라우저로 그 HTML 파일을 열어서 확인). 읽는 법은 아래와 같다.
+
+읽는 법:
+- **오케스트레이터는 전역 `ToolRegistry`만 안다** — 어떤 서비스가 몇 개 있는지, 내부 구조가 뭔지는 모른다.
+- **`WorkflowRegistry`는 서비스마다 쓰거나 안 쓰거나다** — `subscription_status`/`subscription_weather_flow`만 실제로 쓰고(분기/재시도/판단 노드가 있어서), `weather`/`applicant_list`는 아예 안 쓴다(§ "언제 WorkflowRegistry를 생략하는가").
+- **`subscription_weather_flow`의 두 점선(직접 호출)**: `subscription_status`/`weather`의 tool 함수를 **직접** 호출한다는 뜻 — 이 경로는 각 tool의 `GuardrailChain.run()`(input 검증)을 우회한다(§ "서비스를 조합하는 서비스" 절).
+- **`applicant_list`의 라벨 붙은 점선(prompt만)**: `subscription_status`로 이어지는 걸 tool description 문구로만 안내하고 코드로 연결하지 않았다 — 사람이 매번 다른 신청자를 고르는 시나리오라 고정 서브 workflow로 안 묶은 결과다(§ "입력 없는 목록 조회" 절).
+
 ## 요청 하나의 전체 흐름 (`main.py` 예시 기준)
 
 ```
@@ -398,6 +409,7 @@ INFO  agent_loop.tracing           | trace 6c80695b end   [orchestrator] orchest
 - **미해결 논의 — LangGraph의 checkpointer식 영속화가 필요한가.** 위 항목의 근본 원인은 "멈춘 상태를 프로세스 메모리 밖(DB 등)에 저장했다가, 나중에 다른 프로세스/다른 시점에서도 정확히 그 지점부터 재개한다"는 기능 자체가 없다는 것이다. LangGraph의 checkpointer가 하는 일과 비교하며 논의했는데, `manual_review`가 대표하는 실제 업무(사람이 서류를 몇 시간~며칠 걸려 검토)를 생각하면 이 갭은 실재한다는 데는 동의했다. **아직 구현하지 않음** — 세션 저장소 종류(파일/Redis/DB)와 배포 형태(단일 프로세스 유지 vs 여러 워커로 분산)가 안 정해진 채로 먼저 만들면 나중에 실제 요구사항이 드러났을 때 다시 뜯어고칠 위험이 크다는 판단. 실제로 필요해지는 신호는 (1) 사람이 몇 시간/며칠 뒤에 승인·반려하는 실제(모의가 아닌) 시나리오가 생기는가, (2) 그 사이 서버 재시작이나 여러 인스턴스 분산 배포가 실제로 필요한가 — 이 둘 중 하나라도 나타나면 그때 checkpointer 스타일 영속화를 설계한다.
 - **미해결 논의 — 병렬 분기(fan-out/join)가 필요한가.** `StateMachine.run()`(`framework/workflow/state_machine.py:51-94`)은 `current` 변수 하나로 추적하는 순수 순차 루프라 `next`의 outcome이 항상 다음 스텝 "하나"로만 resolve된다 — 여러 스텝을 동시에 실행하고 결과를 합치는 fan-out/join 개념 자체가 없다. "두 서비스의 결과를 같이 들고 다음 지점으로 넘어가야 하는" 요구는 이미 지금 방식(공유 `context`에 각자 순차적으로 결과를 채우는 것 — `subscription_weather_flow`가 실제 사례)으로 충분하다는 데는 합의했다. 진짜 동시 실행(두 호출 사이에 데이터 의존관계가 없어서 지연시간을 줄이려고 병렬로 부르는 것)은 `next`가 여러 타겟을 가리키게 하고 join 지점을 새로 설계해야 하는, 지금 없는 기능이다. **아직 구현하지 않음** — 지금 4개 서비스 중 "의존관계 없는 두 호출을 동시에 불러야 할 만큼 느린" 실제 사례가 없어서, 그런 필요가 실제로 발생할 때까지 보류.
 - **미해결 논의 — tool 본문 안에 `complete()`를 직접 박아넣으면 어떻게 되는가.** 지금 이 프로그램 전체에서 AI가 실제로 결정에 참여하는 지점은 `OpenAIRunner.choose_tool()`(tool 선택) 단 한 곳뿐이다(`grep`으로 확인 — `complete()` 호출부가 `main.py:59`에만 있음). `judged`/`human_action`이 감사 가능성을 위해 bounded choices를 강제하는 것과 달리, tool 함수 본문에서 `framework.llm.openai_client.complete()`를 직접 호출하는 건 파이썬 문법상 막을 방법이 없다 — 다만 그러면 반환값의 형태를 코드 어디에도 선언할 수 없어 `guardrail`/`registry.validate()`/`WorkflowRegistry.validate()`가 검증할 대상 자체가 사라지고, 로그에도 "왜 이 결과가 나왔는지"가 `judged '...' -> '...'` 같은 명확한 라인이 아니라 자유 텍스트 생성으로만 남는다. 즉 "선택은 자유롭되 감사는 가능해야 한다"는 이 프레임워크의 핵심 제약을 그 tool 안에서는 포기하는 트레이드오프다. **아직 구현하지 않음** — 정형화가 원천적으로 불가능한 자유 텍스트 생성이 목적 자체인 tool이 실제로 필요해지기 전까지는 열어둔 질문으로만 남겨둔다.
+- **미해결 논의 — `manual_review` 앞에 AI 기반 중요도 분류(triage)를 넣을지.** 지금은 `fetch_status`가 `status_confidence != "confirmed"`면 무조건(예외 없이) `manual_review`(사람 판단)로 보낸다. "덜 중요한 판단은 AI에게 위임하고 싶어질 수도 있다"는 논의가 나왔는데, 이건 사실 이 프로젝트가 이미 한 번 시도했다가 되돌린 구조와 같다 — 외부 커밋으로 처음 들어왔을 때 이 지점은 `@judged`가 "자동승인"/"수동검토" 중 뭘 고를지 AI가 판단하는 구조였고, "`manual_review`라는 이름의 노드 안에서 AI가 자동으로 판단한다"는 게 이름과 행동이 모순돼 지금의 `human_action`(사람이 직접 승인/반려)으로 바꿨다(§ "human-in-the-loop" 절). 다시 넣는다면 그 모순을 반복하지 않도록 **역할을 분리**해야 한다는 데는 논의 중 합의했다 — 예: 새 `judged()` 노드 `triage`를 하나 더 두어 bounded choices를 "경미"/"중요" 같은 **중요도 분류로만** 한정하고(승인/반려를 직접 고르게 하지 않음), "경미"는 별도 자동 처리 경로로, "중요"는 지금처럼 `manual_review`로 보낸다 — 이러면 `triage`(AI가 함)와 `manual_review`(사람이 함)가 이름과 실제 행동이 어긋나지 않는다. **아직 구현하지 않음** — "누군가 원할 수도 있겠다"는 가정 단계일 뿐 구체적인 need가 아직 없어서, 실제로 사람에게 넘어가는 케이스 중 "이건 AI가 걸러줬어도 됐을 텐데"라는 구체적 사례가 쌓이기 전까지는 보류.
 - human_action의 action은 여전히 "라벨 + payload"로만 끝난다 — action이 실제로 다른 capability를 호출·연결하는 것(예: `"서류추가요청"`이 서류 재제출 처리 tool로 실제 핸드오프하는 것)은 의도적으로 미룬 범위다. 실제로 연결할 대상 capability가 생기면 그때 실행 로직을 얹기로 함(YAGNI로 미룬 것이지 빠뜨린 게 아님).
 - `main.py`의 `FirstMatchRunner`는 이름이 긴 tool부터 substring 매칭하도록 고쳤지만(한 tool 이름이 다른 tool 이름을 포함하는 경우 대비, 예: `weather` ⊂ `subscription_weather_flow`), 여전히 순수 문자열 포함 검사라 실제 자연어 요청 라우팅에는 쓸 수 없다 — 오프라인 샘플 테스트 전용 스텁이라는 원래 성격은 그대로.
 - `ToolRegistry.validate()`(tool/guardrail 카탈로그)와 `WorkflowRegistry.validate()`(파일별 step/next/judged/human_action) 둘 다 참조 무결성만 본다 — "adapter.py가 BaseAdapter를 상속했는가", "mapping.json이 실제로 존재하는가" 같은 파일 시스템/클래스 계층 검사나, "새 tool description이 기존 tool과 의미가 안 겹치는가" 같은 의미적 검사(`guides/legacy_adapter_guide.md` 체크리스트 항목)는 하지 않는다 — 이런 건 코드로 자동 판별하기 어려워 사람 리뷰 영역으로 남겨둠.
