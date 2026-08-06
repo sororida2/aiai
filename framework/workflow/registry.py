@@ -72,9 +72,15 @@ class WorkflowRegistry:
         *,
         source: str | None = None,
         next: dict[str, str] | None = None,
-        max_retries: int = 0,
+        max_retries: int = 5,
     ) -> Callable:
-        """결정론적 분기/순환은 여기 next 맵으로 고정한다. agent 재추론 대상이 아니다."""
+        """결정론적 분기/순환은 여기 next 맵으로 고정한다. agent 재추론 대상이 아니다.
+
+        max_retries는 선언 안 해도 기본 5회 — 순환(self-loop이든 여러 스텝을 왕복하는
+        순환이든)이 무한히 도는 걸 막는 안전장치가 스텝 작성자가 깜빡해도 항상 켜져
+        있도록, "선언 안 하면 무제한"이 아니라 "선언 안 하면 5"로 기본값을 잡았다.
+        진짜 무제한이 필요한 예외적인 경우라면 큰 값을 명시적으로 넘기면 된다.
+        """
 
         def decorator(func: Callable) -> Callable:
             name = func.__name__
@@ -156,6 +162,12 @@ class WorkflowRegistry:
                         ) from e
 
                 logger.info("human_action '%s' -> %r", name, action)
+                # 소비한 답은 context에서 지운다 — 안 지우면 같은 human_action 노드가
+                # (evaluator처럼) 한 run() 안에서 다시 방문될 때 새 결정을 기다리지 않고
+                # 예전 답을 그대로 재사용해버린다. 관례상 이 데코레이터가 감싸는 함수는
+                # 항상 func(context: dict[str, Any])로 호출되므로 args[0]가 context다.
+                if args and isinstance(args[0], dict):
+                    args[0].pop("human_action", None)
                 return action
 
             wrapper.__human_action_name__ = name

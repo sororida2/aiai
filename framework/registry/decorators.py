@@ -18,6 +18,10 @@ class ToolSpec:
     input_schema: dict[str, Any]
     workflow_registry: WorkflowRegistry | None = None
 
+    def __call__(self, *args: Any, **kwargs: Any) -> Any:
+        """spec 자체를 호출 가능하게 만들어, 호출부가 `.func`를 직접 알 필요가 없게 한다."""
+        return self.func(*args, **kwargs)
+
 
 @dataclass
 class GuardrailSpec:
@@ -57,6 +61,17 @@ class ToolRegistry:
 
     def tools(self) -> dict[str, ToolSpec]:
         return dict(self._tools)
+
+    def tool_for(self, name: str) -> ToolSpec:
+        """이름 하나로 등록된 tool을 바로 찾는다 — `tools()`처럼 전체 dict를 복사하지 않는다.
+
+        반환값(`ToolSpec`) 자체가 호출 가능하므로(`__call__`), 호출부는 `.func`를
+        직접 알 필요 없이 `registry.tool_for(name)(...)`처럼 바로 쓰면 된다.
+        """
+        spec = self._tools.get(name)
+        if spec is None:
+            raise KeyError(f"tool '{name}' is not registered")
+        return spec
 
     def guardrail_for(self, name: str) -> GuardrailSpec | None:
         return self._guardrails.get(name)
