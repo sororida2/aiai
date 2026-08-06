@@ -15,7 +15,7 @@ class SubscriptionStatusAdapter(BaseAdapter):
     """
 
     def __init__(self) -> None:
-        super().__init__(mapping=SemanticMapping.from_json(MAPPING_PATH))
+        self.mapping = SemanticMapping.from_json(MAPPING_PATH)
 
     def call(self, *, applicant_id: str) -> dict[str, Any]:
         # TODO: 실제 레거시 REST/DB 호출로 교체. 지금은 스캐폴드용 스텁 응답.

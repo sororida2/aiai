@@ -21,7 +21,7 @@ class WeatherAdapter(BaseAdapter):
     """
 
     def __init__(self) -> None:
-        super().__init__(mapping=SemanticMapping.from_json(MAPPING_PATH))
+        self.mapping = SemanticMapping.from_json(MAPPING_PATH)
 
     def call(self, *, location: str) -> dict[str, Any]:
         geo = requests.get(GEOCODING_URL, params={"name": location, "count": 1}, timeout=10)

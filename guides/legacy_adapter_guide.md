@@ -50,11 +50,14 @@ def my_tool(...) -> dict[str, Any]:
 ## 3. 레거시/외부 어댑터 서비스라면
 
 - `adapter.py` — `BaseAdapter` 상속. `call(self, **kwargs) -> dict[str, Any]`(프로토콜적 면 — REST/DB/인증이 이 함수 안에 갇혀야 함, 인자는 전부 keyword-only)와 `normalize(self, raw_response) -> dict[str, Any]`(의미론적 면 — `self.mapping.normalize(...)`로 얻은 `MappedValue`에서 `.value`/`.confidence`를 꺼내 `@guardrail(output_schema=...)`에 선언한 키와 1:1로 채움)를 분리 구현한다.
-- `mapping.json` — **이 서비스 전용으로 새로 만든다.** 값이 다른 서비스와 우연히 같아도(예: `applicant_list`와 `subscription_status`의 상태 5종) import로 공유하지 않는다 — "서비스는 자기 매핑 자산을 스스로 갖는다"는 원칙. 각 엔트리는 `{"value": <정규화 문자열>, "confidence": "confirmed" | "inferred"}` 형태다.
+- `mapping.json` — **정규화할 원시 코드값이 있는 서비스만 만든다** (`BaseAdapter.__init__`은 이걸 요구하지 않는다 — 필요한 어댑터가 자기 `__init__`에서 `self.mapping = SemanticMapping.from_json(...)`으로 직접 든다). 만들 땐 이 서비스 전용으로 새로 만든다 — 값이 다른 서비스와 우연히 같아도(예: `applicant_list`와 `subscription_status`의 상태 5종) import로 공유하지 않는다("서비스는 자기 매핑 자산을 스스로 갖는다"는 원칙). 각 엔트리는 `{"value": <정규화 문자열>, "confidence": "confirmed" | "inferred"}` 형태다.
   - `confirmed`는 사람이 레거시 명세나 실측으로 검증을 마친 매핑, `inferred`는 코드만 보고 추정했지만 아직 검증되지 않은 매핑이다.
   - 매핑에 아예 없는 raw 코드값은 `inferred`로 대충 채우지 않는다 — `UnmappedValueError`로 fail-fast하게 두고 그대로 전파시킨다("모르는 값은 모른다고 실패").
 - **`inferred` 값은 판단 분기(`judged`/`human_action` 이외의 곳)에서 그대로 쓰면 안 된다.** `fetch_status`가 `result["status_confidence"] != "confirmed"`를 직접 체크해 `"미확인"` outcome으로 `manual_review`(human_action)에 위임하는 게 표준 패턴이다.
 - 승격(promotion): `inferred` 값이 반복 관측되면 사람이 실제 레거시 스펙을 확인해 `mapping.json`의 `confidence`를 `"confirmed"`로 바꿔야 한다는 신호다 — 이 확인은 코드가 자동으로 하지 않는다.
+- **다른 tool과 개념이 겹치는지 먼저 확인한다.** 새 어댑터가 다루는 값(국가/통화/날짜/ID 등)을 이미 등록된 다른 tool도 다룬다면, 그 tool이 어떤 표현 규약을 쓰는지 먼저 확인하고 같은 규약을 따른다 — `registry.validate()`/`WorkflowRegistry.validate()`는 이런 의미적 중복·불일치를 검사하지 않으므로 사람이 직접 확인해야 한다(`limitation.md`의 핵심 논지 — "질문의 방법론은 사전에 결정된다"는 것을 여기서 실무적으로 만난다).
+  - 외부 API 자체가 그 규약과 다른 형식을 요구하면(예: `country_code`를 쓰는 `public_holiday`와 달리 Hipolabs Universities API는 자유 국가명 문자열만 받음), 변환은 어댑터 내부에 가둔다 — `services/university_search/adapter.py`가 실제 예시다. 공개 입력은 다른 tool과 같은 규약(`country_code`)으로 받고, `call()` 안에서 `SemanticMapping`(여기선 출력이 아니라 **입력값 정규화** 용도로 재사용)으로 그 API가 실제로 원하는 문자열로 변환한다.
+  - 이 변환을 코드로 자동화하려면, 두 표현이 동시에 나타나는 **공통 데이터(다리)**가 실제로 있는지부터 확인한다 — `university_search/mapping.json`은 Hipolabs API 자신의 응답에 `alpha_two_code`와 `country`가 같이 오길래 거기서 뽑아낸 것이지, 손으로 지어낸 게 아니다. 그런 다리가 없으면 억지로 맞추지 말고, 파라미터 이름 자체를 다르게 지어(`country_code` vs `country`처럼) 최소한 그 차이가 겉으로 드러나게 한다.
 
 ## 4. 조합 서비스(다른 tool을 부르는 서비스)라면
 
@@ -97,6 +100,7 @@ def query_subscription(context: dict[str, Any]) -> str:
 - [ ] 오케스트레이터/`main.py`/`framework/` 코드를 한 줄도 고치지 않았는가
 - [ ] 다른 서비스를 부른다면 직접 import 대신 `registry.tool_for("<name>")`를 스텝 본문 안에서 썼는가(§4)
 - [ ] 신규 tool description이 기존 tool과 의미가 겹치지 않는가 (`registry.validate()`가 못 잡는다 — 사람이 확인)
+- [ ] 새 tool이 다루는 개념(국가/통화/날짜 등)이 이미 등록된 다른 tool과 겹친다면, 같은 표현 규약을 쓰거나 최소한 파라미터 이름으로 그 차이가 드러나는가(§3, `limitation.md`)
 - [ ] inferred 매핑이 판단 분기(judged/human_action 이외)에 쓰이지 않는가
 - [ ] 미확인 코드값이 guardrail에서 fail-fast로 차단되는가
 - [ ] (`WorkflowRegistry`를 쓰는 경우) `workflow.py` import 시점에 `steps.validate()`가 오류 없이 통과하는가

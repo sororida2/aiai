@@ -14,6 +14,19 @@
 - **`manual_review` 앞에 AI 기반 중요도 분류(triage)를 넣을지** — "덜 중요한 판단은 AI에게 위임"은 예전에 시도했다가 이름-행동 모순으로 되돌린 구조와 같아서, 다시 하려면 `triage`(AI, 중요도만 분류)와 `manual_review`(사람, 실제 결정)를 역할 분리해야 함. 사람에게 넘어가는 케이스 중 "AI가 걸러줬어도 됐을" 구체적 사례가 쌓이기 전까진 보류.
 - **Orchestrator 경계의 일반 예외 처리(구조화된 에러 응답)** — 지금은 `AwaitingHumanAction` 하나만 특별 취급하고 나머지 예외(`GuardrailViolation`/`UnmappedValueError`/`MaxRetriesExceeded`/버그 등)는 전부 그대로 터진다. 초기 단계에서는 이렇게 안 막아야 버그가 바로 드러난다는 판단으로 **의도적으로 보류** — 채팅 UI 등에서 tool 하나의 실패로 전체 대화가 끊기면 안 되는 실제 배포 상황이 생기기 전까진 지금처럼 둔다.
 
+## 근본적 한계 — 질문의 방법론은 사전에 결정된다
+
+위 "열린 질문"들이 전부 같은 뿌리를 공유한다는 게 4개 서비스(`public_holiday`/`exchange_rate`/`ip_geolocation`/`university_search`)를 추가하면서 드러났다. `registry.tools()`(tool 카탈로그), `WorkflowRegistry`의 `choices=(...)`(judged/human_action), `@guardrail`의 스키마, `SemanticMapping`(`mapping.json`) — 이 넷은 전부 **코드 작성 시점에 사람이 닫아두는 자산**이고, `Orchestrator.handle(request, **kwargs)`로 들어오는 자연어가 실제로 착지할 수 있는 자리는 이 자산들뿐이다.
+
+실측으로 확인된 두 가지:
+
+1. **tool 선택(라우팅)은 이 구조의 강점과 정확히 일치한다.** `AgentRunner.choose_tool()`을 자연어 요청 9개(tool 이름을 언급하지 않은 문장)로 직접 실험했을 때 전부 정확히 골랐다 — 등록된 카탈로그 중 분류하는 문제라서다. "상태+날씨" 복합 요청도 `common/orchestrator.md`의 "고정 서브 workflow부터 확인하라" 규칙대로 `subscription_weather_flow`를 정확히 찾아냈다.
+2. **인자 채우기(argument filling)는 같은 방식으로 바로 무너진다.** `public_holiday(year, country_code)`에서 "이번 크리스마스"만으론 `year`가 안 나오고(스키마에 기본값 규칙이 없음), `exchange_rate(base, symbols)`에서 "원화로"는 base인지 symbols인지 문장만으론 진짜 모호하다. `AgentRunner`에 `choose_tool()`만 있고 인자 추출 메서드가 없는 것도 이 비대칭을 그대로 보여준다.
+
+`services/university_search/mapping.json`(alpha-2 코드 200개)이 만들어질 수 있었던 것도, Hipolabs API 자신의 응답 레코드 안에 `alpha_two_code`와 `country`가 이미 같이 있었기 때문이다 — 다리를 새로 놓은 게 아니라 데이터 안에 있던 다리를 찾아 꺼낸 것이다. 이 다리가 없는 두 표현 사이는 이 프레임워크가 자동으로 못 잇는다.
+
+즉 이 시스템이 실시간으로 잘 하는 일은 "이미 있는 선택지 중 맞는 걸 고르는 것"(bounded classification)이고, "선택지 자체가 없는 곳에 새 선택지를 만들어내는 것"은 못 한다 — 위 열린 질문 목록의 "서비스 간 겹치는 필드 공유", "`manual_review` 앞 triage", "`complete()` 직접 호출" 세 항목은 전부 이 한 가지 한계의 다른 표현이다. 결함이 아니라 `ai_framework_2.md`가 처음부터 선택한 트레이드오프(judged branch는 반드시 bounded여야 감사 가능하다)의 필연적 귀결이며, 실증 근거와 상세 논의는 `limitation.md` 참고.
+
 ```
 framework/                  ← 엔진. 새 서비스를 추가해도 손대지 않는 것이 목표.
 ├── registry/decorators.py  ← @tool·@guardrail 데코레이터 + 전역 ToolRegistry(+ validate()) — tool 카탈로그(라우팅 표면)만 관리

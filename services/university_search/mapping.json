@@ -1,0 +1,805 @@
+{
+  "_comment": "Hipolabs Universities API(universities.hipolabs.com) 자체 응답 데이터에서 도출 — alpha_two_code와 country가 같은 레코드에 함께 오므로, 전체 데이터셋(10256건, 2026-08-06 스냅샷)에서 코드별로 가장 많이 쓰인 국가명 표기를 채택했다. 거의 전부 1:1이었고 유일한 예외는 VN (\"Viet Nam\" 49건 vs \"Vietnam\" 9건, 같은 나라의 표기 차이) — 다수 표기를 택해 confirmed로 두지만, 이 쿼리로는 소수 표기(9건)가 안 잡힌다는 한계가 있다(완전 해결하려면 별칭 병합 로직 필요, 아직 안 함).",
+  "mappings": {
+    "AD": {
+      "value": "Andorra",
+      "confidence": "confirmed"
+    },
+    "AE": {
+      "value": "United Arab Emirates",
+      "confidence": "confirmed"
+    },
+    "AF": {
+      "value": "Afghanistan",
+      "confidence": "confirmed"
+    },
+    "AG": {
+      "value": "Antigua and Barbuda",
+      "confidence": "confirmed"
+    },
+    "AL": {
+      "value": "Albania",
+      "confidence": "confirmed"
+    },
+    "AM": {
+      "value": "Armenia",
+      "confidence": "confirmed"
+    },
+    "AO": {
+      "value": "Angola",
+      "confidence": "confirmed"
+    },
+    "AR": {
+      "value": "Argentina",
+      "confidence": "confirmed"
+    },
+    "AT": {
+      "value": "Austria",
+      "confidence": "confirmed"
+    },
+    "AU": {
+      "value": "Australia",
+      "confidence": "confirmed"
+    },
+    "AZ": {
+      "value": "Azerbaijan",
+      "confidence": "confirmed"
+    },
+    "BA": {
+      "value": "Bosnia and Herzegovina",
+      "confidence": "confirmed"
+    },
+    "BB": {
+      "value": "Barbados",
+      "confidence": "confirmed"
+    },
+    "BD": {
+      "value": "Bangladesh",
+      "confidence": "confirmed"
+    },
+    "BE": {
+      "value": "Belgium",
+      "confidence": "confirmed"
+    },
+    "BF": {
+      "value": "Burkina Faso",
+      "confidence": "confirmed"
+    },
+    "BG": {
+      "value": "Bulgaria",
+      "confidence": "confirmed"
+    },
+    "BH": {
+      "value": "Bahrain",
+      "confidence": "confirmed"
+    },
+    "BI": {
+      "value": "Burundi",
+      "confidence": "confirmed"
+    },
+    "BJ": {
+      "value": "Benin",
+      "confidence": "confirmed"
+    },
+    "BM": {
+      "value": "Bermuda",
+      "confidence": "confirmed"
+    },
+    "BN": {
+      "value": "Brunei Darussalam",
+      "confidence": "confirmed"
+    },
+    "BO": {
+      "value": "Bolivia, Plurinational State of",
+      "confidence": "confirmed"
+    },
+    "BR": {
+      "value": "Brazil",
+      "confidence": "confirmed"
+    },
+    "BS": {
+      "value": "Bahamas",
+      "confidence": "confirmed"
+    },
+    "BT": {
+      "value": "Bhutan",
+      "confidence": "confirmed"
+    },
+    "BW": {
+      "value": "Botswana",
+      "confidence": "confirmed"
+    },
+    "BY": {
+      "value": "Belarus",
+      "confidence": "confirmed"
+    },
+    "BZ": {
+      "value": "Belize",
+      "confidence": "confirmed"
+    },
+    "CA": {
+      "value": "Canada",
+      "confidence": "confirmed"
+    },
+    "CD": {
+      "value": "Congo, the Democratic Republic of the",
+      "confidence": "confirmed"
+    },
+    "CF": {
+      "value": "Central African Republic",
+      "confidence": "confirmed"
+    },
+    "CG": {
+      "value": "Congo",
+      "confidence": "confirmed"
+    },
+    "CH": {
+      "value": "Switzerland",
+      "confidence": "confirmed"
+    },
+    "CI": {
+      "value": "Côte d'Ivoire",
+      "confidence": "confirmed"
+    },
+    "CL": {
+      "value": "Chile",
+      "confidence": "confirmed"
+    },
+    "CM": {
+      "value": "Cameroon",
+      "confidence": "confirmed"
+    },
+    "CN": {
+      "value": "China",
+      "confidence": "confirmed"
+    },
+    "CO": {
+      "value": "Colombia",
+      "confidence": "confirmed"
+    },
+    "CR": {
+      "value": "Costa Rica",
+      "confidence": "confirmed"
+    },
+    "CU": {
+      "value": "Cuba",
+      "confidence": "confirmed"
+    },
+    "CV": {
+      "value": "Cape Verde",
+      "confidence": "confirmed"
+    },
+    "CY": {
+      "value": "Cyprus",
+      "confidence": "confirmed"
+    },
+    "CZ": {
+      "value": "Czech Republic",
+      "confidence": "confirmed"
+    },
+    "DE": {
+      "value": "Germany",
+      "confidence": "confirmed"
+    },
+    "DJ": {
+      "value": "Djibouti",
+      "confidence": "confirmed"
+    },
+    "DK": {
+      "value": "Denmark",
+      "confidence": "confirmed"
+    },
+    "DM": {
+      "value": "Dominica",
+      "confidence": "confirmed"
+    },
+    "DO": {
+      "value": "Dominican Republic",
+      "confidence": "confirmed"
+    },
+    "DZ": {
+      "value": "Algeria",
+      "confidence": "confirmed"
+    },
+    "EC": {
+      "value": "Ecuador",
+      "confidence": "confirmed"
+    },
+    "EE": {
+      "value": "Estonia",
+      "confidence": "confirmed"
+    },
+    "EG": {
+      "value": "Egypt",
+      "confidence": "confirmed"
+    },
+    "ER": {
+      "value": "Eritrea",
+      "confidence": "confirmed"
+    },
+    "ES": {
+      "value": "Spain",
+      "confidence": "confirmed"
+    },
+    "ET": {
+      "value": "Ethiopia",
+      "confidence": "confirmed"
+    },
+    "FI": {
+      "value": "Finland",
+      "confidence": "confirmed"
+    },
+    "FJ": {
+      "value": "Fiji",
+      "confidence": "confirmed"
+    },
+    "FO": {
+      "value": "Faroe Islands",
+      "confidence": "confirmed"
+    },
+    "FR": {
+      "value": "France",
+      "confidence": "confirmed"
+    },
+    "GA": {
+      "value": "Gabon",
+      "confidence": "confirmed"
+    },
+    "GB": {
+      "value": "United Kingdom",
+      "confidence": "confirmed"
+    },
+    "GD": {
+      "value": "Grenada",
+      "confidence": "confirmed"
+    },
+    "GE": {
+      "value": "Georgia",
+      "confidence": "confirmed"
+    },
+    "GF": {
+      "value": "French Guiana",
+      "confidence": "confirmed"
+    },
+    "GH": {
+      "value": "Ghana",
+      "confidence": "confirmed"
+    },
+    "GL": {
+      "value": "Greenland",
+      "confidence": "confirmed"
+    },
+    "GM": {
+      "value": "Gambia",
+      "confidence": "confirmed"
+    },
+    "GN": {
+      "value": "Guinea",
+      "confidence": "confirmed"
+    },
+    "GP": {
+      "value": "Guadeloupe",
+      "confidence": "confirmed"
+    },
+    "GQ": {
+      "value": "Equatorial Guinea",
+      "confidence": "confirmed"
+    },
+    "GR": {
+      "value": "Greece",
+      "confidence": "confirmed"
+    },
+    "GT": {
+      "value": "Guatemala",
+      "confidence": "confirmed"
+    },
+    "GU": {
+      "value": "Guam",
+      "confidence": "confirmed"
+    },
+    "GY": {
+      "value": "Guyana",
+      "confidence": "confirmed"
+    },
+    "HK": {
+      "value": "Hong Kong",
+      "confidence": "confirmed"
+    },
+    "HN": {
+      "value": "Honduras",
+      "confidence": "confirmed"
+    },
+    "HR": {
+      "value": "Croatia",
+      "confidence": "confirmed"
+    },
+    "HT": {
+      "value": "Haiti",
+      "confidence": "confirmed"
+    },
+    "HU": {
+      "value": "Hungary",
+      "confidence": "confirmed"
+    },
+    "ID": {
+      "value": "Indonesia",
+      "confidence": "confirmed"
+    },
+    "IE": {
+      "value": "Ireland",
+      "confidence": "confirmed"
+    },
+    "IL": {
+      "value": "Israel",
+      "confidence": "confirmed"
+    },
+    "IN": {
+      "value": "India",
+      "confidence": "confirmed"
+    },
+    "IQ": {
+      "value": "Iraq",
+      "confidence": "confirmed"
+    },
+    "IR": {
+      "value": "Iran",
+      "confidence": "confirmed"
+    },
+    "IS": {
+      "value": "Iceland",
+      "confidence": "confirmed"
+    },
+    "IT": {
+      "value": "Italy",
+      "confidence": "confirmed"
+    },
+    "JM": {
+      "value": "Jamaica",
+      "confidence": "confirmed"
+    },
+    "JO": {
+      "value": "Jordan",
+      "confidence": "confirmed"
+    },
+    "JP": {
+      "value": "Japan",
+      "confidence": "confirmed"
+    },
+    "KE": {
+      "value": "Kenya",
+      "confidence": "confirmed"
+    },
+    "KG": {
+      "value": "Kyrgyzstan",
+      "confidence": "confirmed"
+    },
+    "KH": {
+      "value": "Cambodia",
+      "confidence": "confirmed"
+    },
+    "KN": {
+      "value": "Saint Kitts and Nevis",
+      "confidence": "confirmed"
+    },
+    "KP": {
+      "value": "Korea, Democratic People's Republic of",
+      "confidence": "confirmed"
+    },
+    "KR": {
+      "value": "Korea, Republic of",
+      "confidence": "confirmed"
+    },
+    "KW": {
+      "value": "Kuwait",
+      "confidence": "confirmed"
+    },
+    "KY": {
+      "value": "Cayman Islands",
+      "confidence": "confirmed"
+    },
+    "KZ": {
+      "value": "Kazakhstan",
+      "confidence": "confirmed"
+    },
+    "LA": {
+      "value": "Lao People's Democratic Republic",
+      "confidence": "confirmed"
+    },
+    "LB": {
+      "value": "Lebanon",
+      "confidence": "confirmed"
+    },
+    "LC": {
+      "value": "Saint Lucia",
+      "confidence": "confirmed"
+    },
+    "LI": {
+      "value": "Liechtenstein",
+      "confidence": "confirmed"
+    },
+    "LK": {
+      "value": "Sri Lanka",
+      "confidence": "confirmed"
+    },
+    "LR": {
+      "value": "Liberia",
+      "confidence": "confirmed"
+    },
+    "LS": {
+      "value": "Lesotho",
+      "confidence": "confirmed"
+    },
+    "LT": {
+      "value": "Lithuania",
+      "confidence": "confirmed"
+    },
+    "LU": {
+      "value": "Luxembourg",
+      "confidence": "confirmed"
+    },
+    "LV": {
+      "value": "Latvia",
+      "confidence": "confirmed"
+    },
+    "LY": {
+      "value": "Libya",
+      "confidence": "confirmed"
+    },
+    "MA": {
+      "value": "Morocco",
+      "confidence": "confirmed"
+    },
+    "MD": {
+      "value": "Moldova, Republic of",
+      "confidence": "confirmed"
+    },
+    "ME": {
+      "value": "Montenegro",
+      "confidence": "confirmed"
+    },
+    "MG": {
+      "value": "Madagascar",
+      "confidence": "confirmed"
+    },
+    "MK": {
+      "value": "North Macedonia",
+      "confidence": "confirmed"
+    },
+    "ML": {
+      "value": "Mali",
+      "confidence": "confirmed"
+    },
+    "MM": {
+      "value": "Myanmar",
+      "confidence": "confirmed"
+    },
+    "MN": {
+      "value": "Mongolia",
+      "confidence": "confirmed"
+    },
+    "MO": {
+      "value": "Macao",
+      "confidence": "confirmed"
+    },
+    "MR": {
+      "value": "Mauritania",
+      "confidence": "confirmed"
+    },
+    "MS": {
+      "value": "Montserrat",
+      "confidence": "confirmed"
+    },
+    "MT": {
+      "value": "Malta",
+      "confidence": "confirmed"
+    },
+    "MU": {
+      "value": "Mauritius",
+      "confidence": "confirmed"
+    },
+    "MV": {
+      "value": "Maldives",
+      "confidence": "confirmed"
+    },
+    "MW": {
+      "value": "Malawi",
+      "confidence": "confirmed"
+    },
+    "MX": {
+      "value": "Mexico",
+      "confidence": "confirmed"
+    },
+    "MY": {
+      "value": "Malaysia",
+      "confidence": "confirmed"
+    },
+    "MZ": {
+      "value": "Mozambique",
+      "confidence": "confirmed"
+    },
+    "NA": {
+      "value": "Namibia",
+      "confidence": "confirmed"
+    },
+    "NC": {
+      "value": "New Caledonia",
+      "confidence": "confirmed"
+    },
+    "NE": {
+      "value": "Niger",
+      "confidence": "confirmed"
+    },
+    "NG": {
+      "value": "Nigeria",
+      "confidence": "confirmed"
+    },
+    "NI": {
+      "value": "Nicaragua",
+      "confidence": "confirmed"
+    },
+    "NL": {
+      "value": "Netherlands",
+      "confidence": "confirmed"
+    },
+    "NO": {
+      "value": "Norway",
+      "confidence": "confirmed"
+    },
+    "NP": {
+      "value": "Nepal",
+      "confidence": "confirmed"
+    },
+    "NU": {
+      "value": "Niue",
+      "confidence": "confirmed"
+    },
+    "NZ": {
+      "value": "New Zealand",
+      "confidence": "confirmed"
+    },
+    "OM": {
+      "value": "Oman",
+      "confidence": "confirmed"
+    },
+    "PA": {
+      "value": "Panama",
+      "confidence": "confirmed"
+    },
+    "PE": {
+      "value": "Peru",
+      "confidence": "confirmed"
+    },
+    "PF": {
+      "value": "French Polynesia",
+      "confidence": "confirmed"
+    },
+    "PG": {
+      "value": "Papua New Guinea",
+      "confidence": "confirmed"
+    },
+    "PH": {
+      "value": "Philippines",
+      "confidence": "confirmed"
+    },
+    "PK": {
+      "value": "Pakistan",
+      "confidence": "confirmed"
+    },
+    "PL": {
+      "value": "Poland",
+      "confidence": "confirmed"
+    },
+    "PR": {
+      "value": "Puerto Rico",
+      "confidence": "confirmed"
+    },
+    "PS": {
+      "value": "Palestine, State of",
+      "confidence": "confirmed"
+    },
+    "PT": {
+      "value": "Portugal",
+      "confidence": "confirmed"
+    },
+    "PY": {
+      "value": "Paraguay",
+      "confidence": "confirmed"
+    },
+    "QA": {
+      "value": "Qatar",
+      "confidence": "confirmed"
+    },
+    "RE": {
+      "value": "Réunion",
+      "confidence": "confirmed"
+    },
+    "RO": {
+      "value": "Romania",
+      "confidence": "confirmed"
+    },
+    "RS": {
+      "value": "Serbia",
+      "confidence": "confirmed"
+    },
+    "RU": {
+      "value": "Russian Federation",
+      "confidence": "confirmed"
+    },
+    "RW": {
+      "value": "Rwanda",
+      "confidence": "confirmed"
+    },
+    "SA": {
+      "value": "Saudi Arabia",
+      "confidence": "confirmed"
+    },
+    "SC": {
+      "value": "Seychelles",
+      "confidence": "confirmed"
+    },
+    "SD": {
+      "value": "Sudan",
+      "confidence": "confirmed"
+    },
+    "SE": {
+      "value": "Sweden",
+      "confidence": "confirmed"
+    },
+    "SG": {
+      "value": "Singapore",
+      "confidence": "confirmed"
+    },
+    "SI": {
+      "value": "Slovenia",
+      "confidence": "confirmed"
+    },
+    "SK": {
+      "value": "Slovakia",
+      "confidence": "confirmed"
+    },
+    "SL": {
+      "value": "Sierra Leone",
+      "confidence": "confirmed"
+    },
+    "SM": {
+      "value": "San Marino",
+      "confidence": "confirmed"
+    },
+    "SN": {
+      "value": "Senegal",
+      "confidence": "confirmed"
+    },
+    "SO": {
+      "value": "Somalia",
+      "confidence": "confirmed"
+    },
+    "SR": {
+      "value": "Suriname",
+      "confidence": "confirmed"
+    },
+    "SS": {
+      "value": "South Sudan",
+      "confidence": "confirmed"
+    },
+    "SV": {
+      "value": "El Salvador",
+      "confidence": "confirmed"
+    },
+    "SY": {
+      "value": "Syrian Arab Republic",
+      "confidence": "confirmed"
+    },
+    "SZ": {
+      "value": "Swaziland",
+      "confidence": "confirmed"
+    },
+    "TC": {
+      "value": "Turks and Caicos Islands",
+      "confidence": "confirmed"
+    },
+    "TD": {
+      "value": "Chad",
+      "confidence": "confirmed"
+    },
+    "TG": {
+      "value": "Togo",
+      "confidence": "confirmed"
+    },
+    "TH": {
+      "value": "Thailand",
+      "confidence": "confirmed"
+    },
+    "TJ": {
+      "value": "Tajikistan",
+      "confidence": "confirmed"
+    },
+    "TM": {
+      "value": "Turkmenistan",
+      "confidence": "confirmed"
+    },
+    "TN": {
+      "value": "Tunisia",
+      "confidence": "confirmed"
+    },
+    "TR": {
+      "value": "Turkiye",
+      "confidence": "confirmed"
+    },
+    "TT": {
+      "value": "Trinidad and Tobago",
+      "confidence": "confirmed"
+    },
+    "TW": {
+      "value": "Taiwan, Province of China",
+      "confidence": "confirmed"
+    },
+    "TZ": {
+      "value": "Tanzania, United Republic of",
+      "confidence": "confirmed"
+    },
+    "UA": {
+      "value": "Ukraine",
+      "confidence": "confirmed"
+    },
+    "UG": {
+      "value": "Uganda",
+      "confidence": "confirmed"
+    },
+    "US": {
+      "value": "United States",
+      "confidence": "confirmed"
+    },
+    "UY": {
+      "value": "Uruguay",
+      "confidence": "confirmed"
+    },
+    "UZ": {
+      "value": "Uzbekistan",
+      "confidence": "confirmed"
+    },
+    "VA": {
+      "value": "Holy See (Vatican City State)",
+      "confidence": "confirmed"
+    },
+    "VC": {
+      "value": "Saint Vincent and the Grenadines",
+      "confidence": "confirmed"
+    },
+    "VE": {
+      "value": "Venezuela, Bolivarian Republic of",
+      "confidence": "confirmed"
+    },
+    "VG": {
+      "value": "Virgin Islands, British",
+      "confidence": "confirmed"
+    },
+    "VN": {
+      "value": "Viet Nam",
+      "confidence": "confirmed"
+    },
+    "WS": {
+      "value": "Samoa",
+      "confidence": "confirmed"
+    },
+    "XK": {
+      "value": "Kosovo",
+      "confidence": "confirmed"
+    },
+    "YE": {
+      "value": "Yemen",
+      "confidence": "confirmed"
+    },
+    "ZA": {
+      "value": "South Africa",
+      "confidence": "confirmed"
+    },
+    "ZM": {
+      "value": "Zambia",
+      "confidence": "confirmed"
+    },
+    "ZW": {
+      "value": "Zimbabwe",
+      "confidence": "confirmed"
+    }
+  }
+}

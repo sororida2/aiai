@@ -77,3 +77,7 @@ if __name__ == "__main__":
     print(orchestrator.handle("weather 조회해줘", location="Seoul"))
     print(orchestrator.handle("subscription_weather_flow 조회해줘", applicant_id="A123"))
     print(orchestrator.handle("applicant_list 보여줘")["table"])
+    print(orchestrator.handle("public_holiday 조회해줘", year=2026, country_code="US"))
+    print(orchestrator.handle("exchange_rate 조회해줘", base="USD", symbols="KRW,EUR,JPY"))  # base=USD 자체가 미국 타겟
+    print(orchestrator.handle("ip_geolocation 조회해줘", ip="8.8.8.8"))  # Google Public DNS — 위치가 이미 미국(Virginia)으로 잡힘
+    print(orchestrator.handle("university_search 조회해줘", country_code="US")["universities"][:5])  # 전체는 2000개가 넘어 앞 5개만
