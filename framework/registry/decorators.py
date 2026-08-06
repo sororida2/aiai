@@ -76,6 +76,25 @@ class ToolRegistry:
     def guardrail_for(self, name: str) -> GuardrailSpec | None:
         return self._guardrails.get(name)
 
+    def output_schema_for(self, name: str) -> Callable[[], dict[str, Any]]:
+        """다른 tool의 output_schema를 참조하는 thunk를 돌려준다 — 호출부는 lambda를 안 써도 된다.
+
+        `registry.guardrail_for(name).output_schema`를 지금 당장 읽으면 discover_services()의
+        import 순서상 그 tool이 아직 등록 전일 수 있다(예: `subscription_weather_flow`가
+        알파벳상 `weather`보다 먼저 import됨). 그래서 여기서는 즉시 읽지 않고, 나중에
+        `harness/schema.py`의 `validate_schema()`가 실제 검증 시점에 호출할 thunk만 돌려준다 —
+        `@guardrail(output_schema={"weather": registry.output_schema_for("weather")})`처럼 dict
+        리터럴 안에 바로 쓸 수 있다(dict 자체는 그 자리에서 진짜 dict로 만들어지고, 이 값만
+        나중에 풀림). `input_schema_for()`와 이름을 분리해둔 이유: 하나의 이름(`schema_for`)이
+        input/output 둘 중 뭘 주는지 애매해지는 걸 피하려는 것 — 실수로 반대 스키마를
+        가져오는 조용한 버그를 막는다.
+        """
+        return lambda: self.guardrail_for(name).output_schema
+
+    def input_schema_for(self, name: str) -> Callable[[], dict[str, Any]]:
+        """`output_schema_for()`와 대칭 — 다른 tool의 input_schema를 참조하는 thunk를 돌려준다."""
+        return lambda: self.guardrail_for(name).input_schema
+
     def validate(self) -> None:
         """등록된 tool/guardrail 사이의 참조 무결성을 검사한다 (registry 내부 상태만으로 판단 가능한 것만).
 
@@ -140,10 +159,14 @@ def tool(name: str, description: str, *, workflow_registry: WorkflowRegistry | N
     return decorator
 
 
-def guardrail(
-    *, input_schema: dict[str, Any] | None = None, output_schema: dict[str, Any] | None = None
-) -> Callable:
-    """tool 옆에 검증 규칙을 선언한다. 하네스 엔진은 이 선언을 읽기만 하고 tool 이름을 알지 못한다."""
+def guardrail(*, input_schema: dict[str, Any] | None = None, output_schema: dict[str, Any] | None = None) -> Callable:
+    """tool 옆에 검증 규칙을 선언한다. 하네스 엔진은 이 선언을 읽기만 하고 tool 이름을 알지 못한다.
+
+    dict 값 자리에 인자 없는 callable(`registry.schema_for(name)`이 돌려주는 thunk)을 넣으면,
+    `harness/schema.py`의 `validate_schema()`가 그 값을 실제 검증 시점(tool이 호출될 때)에
+    평가한다 — 다른 서비스의 output_schema를 재사용할 때 discover_services()의 import 순서와
+    무관하게 안전해진다(§ ARCHITECTURE.md "서비스를 조합하는 서비스" 절).
+    """
 
     def decorator(func: Callable) -> Callable:
         name = getattr(func, "__tool_name__", func.__name__)

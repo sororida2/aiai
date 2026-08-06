@@ -5,8 +5,6 @@ from typing import Any
 from framework.registry.decorators import guardrail, registry, tool
 from framework.workflow.registry import WorkflowRegistry
 from framework.workflow.state_machine import StateMachine
-from services.subscription_status.workflow import SUBSCRIPTION_STATUS_OUTPUT_SCHEMA
-from services.weather.workflow import WEATHER_OUTPUT_SCHEMA
 
 steps = WorkflowRegistry()
 
@@ -47,7 +45,15 @@ def build_state_machine() -> StateMachine:
         "subscription_status 조회 결과의 region 값을 그대로 weather의 입력으로 사용한다."
     ),
 )
-@guardrail(output_schema={"subscription": SUBSCRIPTION_STATUS_OUTPUT_SCHEMA, "weather": WEATHER_OUTPUT_SCHEMA})
+@guardrail(
+    # dict 자체는 진짜 dict — 다만 각 값이 registry.schema_for()가 돌려주는 thunk라,
+    # discover_services()가 이 파일을 weather보다 먼저 import해도(알파벳 순서) 문제없다.
+    # 실제 스키마는 검증 시점(tool이 호출될 때)에 validate_schema()가 풀어서 읽는다.
+    output_schema={
+        "subscription": registry.output_schema_for("subscription_status"),
+        "weather": registry.output_schema_for("weather"),
+    }
+)
 def subscription_weather_flow(applicant_id: str) -> dict[str, Any]:
     context: dict[str, Any] = {"applicant_id": applicant_id}
     build_state_machine().run(context)

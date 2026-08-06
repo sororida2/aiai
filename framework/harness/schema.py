@@ -57,6 +57,16 @@ def validate_schema(value: dict[str, Any], schema: dict[str, Any] | None, path: 
         if expected_type is Any:
             continue
 
+        if not isinstance(expected_type, dict) and callable(expected_type):
+            # 스키마 값이 dict가 아니라 인자 없는 callable(thunk)이면 지금(재귀 검증
+            # 중, 즉 실제 검증 시점) 평가한다 — 다른 서비스의 스키마를 참조하는
+            # `registry.schema_for(name)` 같은 헬퍼가 이 자리를 위해 lambda를 감춰서
+            # 돌려준다. 호출부는 lambda를 직접 쓸 필요가 없고, 이 함수는 그게
+            # registry를 참조하는지조차 몰라도 된다(제네릭하게 "callable이면 부른다"만 안다).
+            expected_type = expected_type()
+            if expected_type is Any:
+                continue
+
         if isinstance(expected_type, dict) and "choices" in expected_type:
             if value[key] not in expected_type["choices"]:
                 raise SchemaViolation(f"'{field_path}'={value[key]!r} not in enum {expected_type['choices']}")
