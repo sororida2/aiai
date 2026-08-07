@@ -75,7 +75,7 @@ def query_subscription(context: dict[str, Any]) -> str:
 
 **두 tool 호출 사이에 진짜 데이터 의존관계가 있을 때만** 하나의 capability로 묶는다(A의 결과가 B의 입력이 되는 경우, `subscription_weather_flow`의 region→location). 사람이 매번 다르게 고르는 관계(`applicant_list`가 보여준 목록에서 사람이 특정 신청자를 골라 `subscription_status`로 이어가는 것)라면 묶지 말고 개별 tool로 남긴 채 프롬프트로만 안내한다.
 
-**남아있는 예외**: `@guardrail(output_schema=...)`에서 재사용하는 output 스키마 상수(`SUBSCRIPTION_STATUS_OUTPUT_SCHEMA`류)는 지금도 직접 import한다 — 데코레이터가 모듈 로드 시점에 그 값을 필요로 해서 `registry.tool_for()`처럼 호출 시점으로 늦출 수 없기 때문이다(`ARCHITECTURE.md`의 "현재 스캐폴드의 한계"에 기록된 알려진 잔여 결합).
+**output 스키마도 직접 import하지 않는다.** `@guardrail(output_schema={"subscription": registry.output_schema_for("subscription_status"), "weather": registry.output_schema_for("weather")})`처럼 `registry.output_schema_for("<name>")`/`input_schema_for("<name>")`로 쓴다 — `output_schema` 자체는 그 자리에서 즉시 만들어지는 진짜 dict이고, 그 안의 각 값(thunk)만 검증 시점(tool이 실제 호출될 때)에 풀린다. `harness/schema.py`의 `validate_schema()`가 이 지연 평가를 처리하므로 코드에 `lambda`가 보이지 않는다 — `discover_services()`의 import 순서와 무관하게 안전하다(`subscription_weather_flow`의 실제 사례, `ARCHITECTURE.md`의 `harness/guardrail.py` 절 참고).
 
 ## 5. 함수 시그니처 규약
 

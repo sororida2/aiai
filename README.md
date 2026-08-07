@@ -95,6 +95,8 @@ Claude connector 등이 쓰는 MCP(Model Context Protocol)는 지금까지 설�
 
 이건 결함이 아니라 위 "레거시 통합" 절에서 이미 선택한 트레이드오프(감사 가능성을 위해 AI의 자유를 미리 좁혀둔다)의 다른 얼굴이다. 실제로 tool 선택 vs 인자 채우기를 나눠 실험해본 근거와 상세 논의는 `limitation.md` 참고.
 
+**(업데이트) 인자 채우기도 이후 `AgentRunner.extract_arguments()`로 실제 동작하게 만들었다** — `orchestrator.handle("미국에 있는 대학 5개만 보여줘")`처럼 자연어만 던져도 라우팅+인자 채움이 끝까지 돈다. 다만 이건 위에서 말한 "다리가 없으면 못 잇는다"는 한계를 없앤 게 아니라, 그 다리가 없는 자리를 모델의 자유 생성으로 덮어버린 것뿐이다 — 결과가 맞는지 감사할 방법은 여전히 없다(`limitation.md`의 "업계 비교" 절에 상세).
+
 ## 우선순위 제안 (진행 상황)
 
 1. ~~첫 번째 케이스(청약진행상황)로 어댑터 인터페이스(함수 시그니처, 에러 포맷, 상태 정규화 규칙)를 확정~~ — 완료. `services/subscription_status/`
@@ -104,6 +106,8 @@ Claude connector 등이 쓰는 MCP(Model Context Protocol)는 지금까지 설�
 **가이드 문서화 이후 추가로 구현된 것** (원래 5가지 과제 중 나머지를 실제 동작으로 검증):
 - `manual_review` judged 노드와 오케스트레이터 라우팅(`OpenAIRunner`)에 실제 OpenAI 호출 연결 — `framework/llm/openai_client.py`
 - `services/` auto-discovery + 기동 시점 일관성 검사 (`registry.validate()`) — "3. Agent 내 신규 서비스 추가 시 병렬로 독립적 추가가 가능한 구조" 과제를 오케스트레이터뿐 아니라 조립 지점(`main.py`)까지 무손대기로 달성
+- 외부 API 서비스 4개(`public_holiday`/`exchange_rate`/`ip_geolocation`/`university_search`) 추가로 "tool 라우팅은 되는데 인자 채우기는 안 된다"는 구조적 한계를 실측(`limitation.md`)
+- `AgentRunner.extract_arguments()` 추가 — 자연어에서 tool 인자를 최대한 추측해 채우는 단계. kwargs 없이 순수 자연어 요청만으로도 라우팅부터 실행까지 끝까지 도는 첫 사례(`orchestrator.handle("미국에 있는 대학 5개만 보여줘")`)
 - 구체적 구현·검증 내역, 남은 한계는 `ARCHITECTURE.md` 참고 (as-built 문서, 이 문서보다 최신 상태 유지)
 
 ---

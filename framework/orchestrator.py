@@ -21,6 +21,18 @@ class AgentRunner(Protocol):
 
     def choose_tool(self, request: str, tool_catalog: list[dict[str, Any]], prompt: str) -> str: ...
 
+    def extract_arguments(
+        self, request: str, tool_name: str, input_schema: dict[str, Any], known: dict[str, Any]
+    ) -> dict[str, Any]:
+        """자연어 request에서 아직 안 채워진 파라미터 값을 최대한 추측해서 돌려준다.
+
+        `input_schema`는 아직 `known`(호출자가 이미 명시적으로 준 kwargs)에 없는
+        필드만 담고 있다 — 이미 있는 값은 다시 추측 대상이 아니다. 확신 없는
+        필드는 결과 dict에서 그냥 빼면 된다(억지로 채우지 않는다) — 그러면
+        `spec.func(**kwargs)` 호출 시 파이썬이 "필수 인자 없음"으로 바로 실패해서,
+        조용히 잘못된 값이 들어가는 것보다 낫다.
+        """
+
 
 @dataclass
 class Orchestrator:
@@ -48,6 +60,15 @@ class Orchestrator:
             if spec is None:
                 logger.error("agent chose unregistered tool '%s'", tool_name)
                 raise KeyError(f"agent chose unregistered tool '{tool_name}'")
+
+            # 호출자가 이미 명시적으로 준 kwargs에 없는 필드만 자연어에서 추측해 채운다 —
+            # 전부 이미 있으면(예전처럼 main.py가 kwargs를 다 채워서 부르는 경우) 이 단계는
+            # 아예 안 타므로 기존 호출 방식과 100% 호환된다.
+            missing_schema = {name: type_ for name, type_ in spec.input_schema.items() if name not in kwargs}
+            if missing_schema:
+                extracted = self.agent_runner.extract_arguments(request, tool_name, missing_schema, kwargs)
+                logger.info("arguments extracted from request: %s", extracted)
+                kwargs = {**extracted, **kwargs}  # 호출자가 준 값이 항상 우선(추측값을 덮어쓰지 못함)
 
             with tracer.span(name=tool_name, kind="tool"):
                 try:
