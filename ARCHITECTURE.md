@@ -23,7 +23,9 @@
 1. **tool 선택(라우팅)은 이 구조의 강점과 정확히 일치한다.** `AgentRunner.choose_tool()`을 자연어 요청 9개(tool 이름을 언급하지 않은 문장)로 직접 실험했을 때 전부 정확히 골랐다 — 등록된 카탈로그 중 분류하는 문제라서다. "상태+날씨" 복합 요청도 `common/orchestrator.md`의 "고정 서브 workflow부터 확인하라" 규칙대로 `subscription_weather_flow`를 정확히 찾아냈다.
 2. **인자 채우기(argument filling)는 같은 방식으로 바로 무너진다.** `public_holiday(year, country_code)`에서 "이번 크리스마스"만으론 `year`가 안 나오고(스키마에 기본값 규칙이 없음), `exchange_rate(base, symbols)`에서 "원화로"는 base인지 symbols인지 문장만으론 진짜 모호하다. 당시 `AgentRunner`에 `choose_tool()`만 있고 인자 추출 메서드가 없다는 게 이 비대칭을 그대로 보여줬다 — **이후 `extract_arguments()`를 추가해서 이 gap을 메웠지만(§ 아래 `orchestrator.py` 절), 그렇다고 이 비대칭 자체가 없어진 건 아니다** — 추출된 값이 맞는지 감사할 방법이 없다는 문제는 그대로 남아 있고, `limitation.md`에 그 구체적 한계가 기록돼 있다.
 
-`services/university_search/mapping.json`(alpha-2 코드 200개)이 만들어질 수 있었던 것도, Hipolabs API 자신의 응답 레코드 안에 `alpha_two_code`와 `country`가 이미 같이 있었기 때문이다 — 다리를 새로 놓은 게 아니라 데이터 안에 있던 다리를 찾아 꺼낸 것이다. 이 다리가 없는 두 표현 사이는 이 프레임워크가 자동으로 못 잇는다.
+`services/university_search/mapping.json`(alpha-2 코드 200개)이 만들어질 수 있었던 것도, Hipolabs API 자신의 응답 레코드 안에 `alpha_two_code`와 `country`가 이미 같이 있었기 때문이다 — 다리를 새로 놓은 게 아니라 데이터 안에 있던 다리를 찾아 꺼낸 것이다.
+
+**(업데이트) 이 다리를 "그때그때" 놓는 시도는 이후 추가됨.** "143.248.1.1이 위치한 나라의 대학교 5개를 알려줘"처럼 한 요청이 다른 tool의 결과를 필요로 하는 경우, `Orchestrator._resolve_missing_via_other_tool()`(§ 아래 `orchestrator.py` 절)이 부족한 필드를 다른 tool 호출로 알아낸 뒤 요청 자체를 자연어로 다시 써서 재시도한다 — `ip_geolocation`이 이미 등록돼 있고, 그 출력을 `rewrite_request()`가 자연어로 녹여낼 수 있는 경우에만 성립하는 조건적 해법이다. 즉 "이 프레임워크가 다리를 스스로 놓는다"가 아니라 "이미 있는 다리(등록된 다른 tool)를 찾아서 그때그때 밟고 지나가 본다"는 차이다 — 적당한 tool을 못 찾거나 그 tool 호출도 실패하면 그냥 원래대로 정직하게 실패한다.
 
 즉 이 시스템이 실시간으로 잘 하는 일은 "이미 있는 선택지 중 맞는 걸 고르는 것"(bounded classification)이고, "선택지 자체가 없는 곳에 새 선택지를 만들어내는 것"은 못 한다 — 위 열린 질문 목록의 "서비스 간 겹치는 필드 공유", "`manual_review` 앞 triage", "`complete()` 직접 호출" 세 항목은 전부 이 한 가지 한계의 다른 표현이다. 결함이 아니라 `ai_framework_2.md`가 처음부터 선택한 트레이드오프(judged branch는 반드시 bounded여야 감사 가능하다)의 필연적 귀결이며, 실증 근거와 상세 논의는 `limitation.md` 참고.
 
@@ -164,6 +166,15 @@ def weather(location: str) -> dict[str, Any]:
 **실제로 찾아서 고친 버그**: 이 프로젝트 전체가 `from __future__ import annotations`(PEP 563)를 쓰기 때문에, `_infer_schema()`가 만드는 `input_schema`의 값은 런타임에 실제 `int`/`str` 타입 객체가 아니라 **문자열** `"int"`/`"str"`이다. `FirstMatchRunner.extract_arguments()`를 처음에 `type_ is int`로 짰다가 이것 때문에 항상 `False`라 전혀 안 먹혔다 — 문자열/실제 타입 객체 둘 다 이름으로 비교하도록 고쳤다.
 
 **한계(정직하게).** `extract_arguments()`가 채워주는 건 "확신 없으면 비워서 명확히 실패하게" 하는 정도까지다 — `limitation.md`가 실측한 두 실패 유형(암묵적 기본값 없음, 의미적 모호함)은 여전히 못 잡는다. 모델이 확신 있다고 착각한 채 **틀린 값을 조용히** 채워 넘길 가능성은 그대로 남아있다 — `confirmed`/`inferred` 신뢰도 태깅이나 모호하면 사람에게 되묻는 일시정지(`AwaitingHumanAction`과 같은 패턴)는 아직 안 붙였다(§ `limitation.md`).
+
+**동적 다중 tool 연결 — `rewrite_request()` / `_resolve_missing_via_other_tool()`.** `extract_arguments()`를 거쳐도 여전히 안 채워지는 필드가 있으면(예: "143.248.1.1이 위치한 나라의 대학교 5개를 알려줘" — `university_search`엔 `country_code`가 필요한데 요청 텍스트엔 IP만 있음), `Orchestrator._handle()`은 즉시 실패시키지 않고 `_resolve_missing_via_other_tool(request, blocked_tool, missing_fields)`를 한 번 시도한다:
+1. `"다음 정보를 알아내려면 어떤 tool을 써야 하나: {missing_fields} (원래 요청: ...)"` 형태의 서브 요청으로 `choose_tool()`을 다시 불러 지원 tool을 찾는다 — 못 찾거나(`ValueError`) 원래 막혔던 tool과 같은 tool을 다시 고르면(순환) 바로 `None`을 돌려준다.
+2. 찾은 지원 tool의 인자를 `extract_arguments()`로 채워서 `guardrails.run()`으로 실제 호출한다. 이 호출이 `AwaitingHumanAction`을 던지면 그대로 위로 전파하고(사람 판단이 필요하다는 신호는 실패가 아니므로 삼키지 않음), 그 외 예외는 잡아서 `None`을 돌려준다(이 시도 자체가 실패했다는 뜻).
+3. 성공하면 그 결과를 `AgentRunner.rewrite_request(request, learned)`에 넘겨 원래 요청을 자연어로 다시 쓴다(위 예시라면 `"United States의 대학교 5개를 알려줘"`).
+
+`_handle(request, kwargs, depth)`가 재작성된 요청으로 `depth+1`을 들고 `choose_tool()`부터 처음부터 재시도한다 — 인자를 kwargs에 직접 꽂는 게 아니라 "자연어가 base"라는 원칙을 그대로 지킨 채, 사람이 미리 고정해두지 않은 두 tool을 그때그때 잇는다(`subscription_weather_flow`처럼 코드로 고정된 조합과 대조됨). `MAX_RESOLUTION_DEPTH = 3`이 재작성-재시도 상한이다(`WorkflowRegistry.max_retries`와 같은 이유의 오케스트레이터 레벨 버전) — 다 실패해도 조용히 숨기지 않고 원래 흐름대로 진행해 필수 인자 누락 `TypeError`로 정직하게 끝난다.
+
+**한계.** 이 메커니즘은 "선택지 자체가 없는 곳에 새 선택지를 만드는" 게 아니라 "이미 등록된 다른 tool 중 도움이 될 tool을 찾아서 그 결과를 자연어에 녹이는" 것뿐이다 — `rewrite_request()`가 잘 녹여내는지, `extract_arguments()`가 재작성된 문장에서 다시 정확히 뽑아내는지는 여전히 모델 품질에 달려 있고 감사할 방법이 없다(`limitation.md`와 같은 근본 한계). 또한 서브 요청/서브 tool 호출 각각에 `choose_tool()`/`extract_arguments()`가 한 번씩 더 도는 구조라 지연시간이 늘어난다.
 
 **실제 운영 환경에서 발견·수정한 라우팅 버그.** `OpenAIRunner`로 실행 중 `"weather 조회해줘"`(location은 `kwargs`로 별도 전달) 요청이 모델의 `'NONE'` 응답으로 라우팅 실패했다. `DEBUG` 로그로 실제 프롬프트를 확인해보니, `weather`/`subscription_weather_flow`처럼 description에 "location 하나만 입력받는다" 식으로 필수 입력을 명시한 tool만 실패하고, 그런 문구가 없는 `subscription_status`/`applicant_list`는 정상 라우팅됐다 — 원인은 `common/orchestrator.md`의 "*description에 명시된 입력 스키마 밖의 것을 추측하지 마라*"/"*적합한 tool이 없으면 억지로 고르지 마라*" 규칙이, "요청 텍스트에 인자 값이 없다"를 "적합한 tool이 없다"로 모델이 오판하게 만든 것이었다. 실제로는 인자 값이 `kwargs`로 호출자가 별도로 채워주는 구조라(§ 위 흐름), 라우팅(어떤 tool의 의도에 맞는가)과 인자 채움(텍스트가 그 값을 담고 있는가)은 별개인데 프롬프트가 이 둘을 구분하지 못했던 것. `common/orchestrator.md`에 "요청 텍스트에 tool의 입력 인자 값이 구체적으로 적혀 있지 않아도 된다 — 그 값은 호출자가 별도로 채워 넣는다"는 규칙을 한 줄 추가해 해결했다 — 오늘의 `WorkflowRegistry` 리팩터와는 무관한, 원래부터 있던 라우팅 프롬프트 설계의 갭이었다.
 
@@ -333,6 +344,27 @@ orchestrator.handle("미국에 있는 대학 5개만 보여줘")
 ```
 호출자가 `country_code="US"`를 이미 줬다면 이 단계 전체가 스킵되고 그 값이 그대로 쓰인다 — 추측값은 명시값을 절대 덮어쓰지 않는다.
 
+`extract_arguments()`로도 못 채우는 필드가 남으면(요청 텍스트 자체에 그 정보가 없는 경우) 다른 tool을 거쳐 알아낸 뒤 요청을 다시 써서 재시도한다:
+
+```
+orchestrator.handle("143.248.1.1이 위치한 나라의 대학교 5개를 알려줘")   depth=0
+  └─ agent_runner.choose_tool(...) → "university_search"
+     └─ missing_schema = {"country_code": "str"}
+        └─ extract_arguments(...) → {}   (요청에 country_code에 해당하는 값이 없음)
+     └─ still_missing = ["country_code"]  → _resolve_missing_via_other_tool(request, "university_search", ["country_code"])
+        ├─ choose_tool("다음 정보를 알아내려면 어떤 tool을 써야 하나: country_code (...)") → "ip_geolocation"
+        │    (같은 tool("university_search")이 다시 나왔다면 순환으로 보고 즉시 None)
+        ├─ extract_arguments(request, "ip_geolocation", {...}, {}) → {"ip": "143.248.1.1"}
+        ├─ guardrails.run("ip_geolocation", ...) → {"country": "United States", ...}
+        └─ rewrite_request(request, {"country": "United States", ...})
+             → "United States의 대학교 5개를 알려줘"
+     └─ orchestrator._handle("United States의 대학교 5개를 알려줘", {}, depth=1)   ← 처음부터 재시도
+        └─ choose_tool(...) → "university_search"
+           └─ extract_arguments(...) → {"country_code": "US"}
+              └─ guardrails.run("university_search", ...) → {"universities": [...]}   ← 성공
+```
+지원 tool을 못 찾거나(`choose_tool()`이 `ValueError`) 그 tool 호출 자체가 실패하면 `_resolve_missing_via_other_tool()`은 `None`을 돌려주고, `_handle()`은 재작성을 포기하고 원래 흐름대로 `spec.func(**kwargs)`를 호출해 필수 인자 누락 `TypeError`로 정직하게 실패한다 — 조용히 숨기지 않는다. `depth`가 `MAX_RESOLUTION_DEPTH`(3)에 닿으면 더 시도하지 않고 마찬가지로 정직하게 실패한다.
+
 `fetch_status`의 outcome이 `"미확인"`이면(confidence가 `inferred`) `manual_review`로 진입하는데, 이 노드는 사람의 답이 필요해 여기서 한 번 더 갈린다.
 
 ```
@@ -463,6 +495,7 @@ INFO  agent_loop.tracing           | trace 6c80695b end   [orchestrator] orchest
 - **미해결 논의 — 병렬 분기(fan-out/join)가 필요한가.** `StateMachine.run()`(`framework/workflow/state_machine.py:51-94`)은 `current` 변수 하나로 추적하는 순수 순차 루프라 `next`의 outcome이 항상 다음 스텝 "하나"로만 resolve된다 — 여러 스텝을 동시에 실행하고 결과를 합치는 fan-out/join 개념 자체가 없다. "두 서비스의 결과를 같이 들고 다음 지점으로 넘어가야 하는" 요구는 이미 지금 방식(공유 `context`에 각자 순차적으로 결과를 채우는 것 — `subscription_weather_flow`가 실제 사례)으로 충분하다는 데는 합의했다. 진짜 동시 실행(두 호출 사이에 데이터 의존관계가 없어서 지연시간을 줄이려고 병렬로 부르는 것)은 `next`가 여러 타겟을 가리키게 하고 join 지점을 새로 설계해야 하는, 지금 없는 기능이다. **아직 구현하지 않음** — 지금 4개 서비스 중 "의존관계 없는 두 호출을 동시에 불러야 할 만큼 느린" 실제 사례가 없어서, 그런 필요가 실제로 발생할 때까지 보류.
 - **미해결 논의 — tool 본문 안에 `complete()`를 직접 박아넣으면 어떻게 되는가.** (이 항목을 처음 적었을 땐 "AI가 결정에 참여하는 지점은 `choose_tool()` 뿐"이었지만, 이후 `extract_arguments()`가 추가되면서 그 지점이 하나 더 늘었다 — 아래 "한계" 참고. 이 논의 자체(tool 본문에 직접 `complete()` 박기)는 여전히 미구현.) `judged`/`human_action`이 감사 가능성을 위해 bounded choices를 강제하는 것과 달리, tool 함수 본문에서 `framework.llm.openai_client.complete()`를 직접 호출하는 건 파이썬 문법상 막을 방법이 없다 — 다만 그러면 반환값의 형태를 코드 어디에도 선언할 수 없어 `guardrail`/`registry.validate()`/`WorkflowRegistry.validate()`가 검증할 대상 자체가 사라지고, 로그에도 "왜 이 결과가 나왔는지"가 `judged '...' -> '...'` 같은 명확한 라인이 아니라 자유 텍스트 생성으로만 남는다. 즉 "선택은 자유롭되 감사는 가능해야 한다"는 이 프레임워크의 핵심 제약을 그 tool 안에서는 포기하는 트레이드오프다. **아직 구현하지 않음** — 정형화가 원천적으로 불가능한 자유 텍스트 생성이 목적 자체인 tool이 실제로 필요해지기 전까지는 열어둔 질문으로만 남겨둔다.
 - **(해결됨, 참고로 남김) "자연어에서 인자를 추출하는 AgentRunner가 없다"는 gap을 메웠다.** `AgentRunner.extract_arguments()`(`framework/orchestrator.py`, `OpenAIRunner`/`FirstMatchRunner` 구현은 `main.py`) — `Orchestrator.handle()`이 `choose_tool()` 다음에 이걸 불러서 `kwargs`에 없는 필드만 채운다. `orchestrator.handle("미국에 있는 대학 5개만 보여줘")`처럼 kwargs 없이 순수 자연어만으로도 동작한다(§ 위 `orchestrator.py` 절에 구현/버그/한계 상세). 이걸로 지금 AI가 결정에 참여하는 지점이 `choose_tool()`과 `extract_arguments()` 둘로 늘었다. **다만 채워진 그대로 신뢰할 수 있다는 뜻은 아니다** — 확신 없는 필드를 비워서 명확히 실패하게 하는 최소한의 방어만 있고, `limitation.md`가 실측한 "암묵적 기본값"/"의미적 모호함" 실패 유형은 여전히 못 잡는다(모델이 틀렸는데 확신한 것처럼 채우면 조용히 틀린 값이 들어갈 수 있음).
+- **(해결됨, 참고로 남김) "고정 조합으로 안 묶인 두 tool을 그때그때 이을 방법이 없다"는 gap을 메웠다.** "143.248.1.1이 위치한 나라의 대학교 5개를 알려줘"처럼 한 tool의 누락 인자를 다른 tool의 결과로 메워야 하는 경우, `AgentRunner.rewrite_request()` + `Orchestrator._resolve_missing_via_other_tool()`(§ 위 `orchestrator.py` 절, § 위 "요청 하나의 전체 흐름"의 두 번째 예시)이 부족한 필드를 지원 tool로 알아낸 뒤 요청 텍스트를 다시 써서 `choose_tool()`부터 재시도한다(`MAX_RESOLUTION_DEPTH=3`으로 상한). 가짜 "이해하는" `AgentRunner`로 이 시나리오가 실제로 성공하는 것과, 기존 8개 서비스 전체·pause/resume 흐름에 회귀가 없는 것을 확인했다. **다만 이게 "새 다리를 놓는다"는 뜻은 아니다** — 이미 등록된 tool 중에서만 찾고, 못 찾거나 그 tool 호출도 실패하면 조용히 숨기지 않고 원래대로 정직하게 실패한다(§ 위 "근본적 한계" 절의 "(업데이트)" 문단). "직전 turn의 결과를 참조"하는 것과는 다른 얘기다 — 그건 여전히 안 풀린 별개 gap이다(§ 아래 "목록에서 이름을 보고..." 항목).
 - **미해결 논의 — `manual_review` 앞에 AI 기반 중요도 분류(triage)를 넣을지.** 지금은 `fetch_status`가 `status_confidence != "confirmed"`면 무조건(예외 없이) `manual_review`(사람 판단)로 보낸다. "덜 중요한 판단은 AI에게 위임하고 싶어질 수도 있다"는 논의가 나왔는데, 이건 사실 이 프로젝트가 이미 한 번 시도했다가 되돌린 구조와 같다 — 외부 커밋으로 처음 들어왔을 때 이 지점은 `@judged`가 "자동승인"/"수동검토" 중 뭘 고를지 AI가 판단하는 구조였고, "`manual_review`라는 이름의 노드 안에서 AI가 자동으로 판단한다"는 게 이름과 행동이 모순돼 지금의 `human_action`(사람이 직접 승인/반려)으로 바꿨다(§ "human-in-the-loop" 절). 다시 넣는다면 그 모순을 반복하지 않도록 **역할을 분리**해야 한다는 데는 논의 중 합의했다 — 예: 새 `judged()` 노드 `triage`를 하나 더 두어 bounded choices를 "경미"/"중요" 같은 **중요도 분류로만** 한정하고(승인/반려를 직접 고르게 하지 않음), "경미"는 별도 자동 처리 경로로, "중요"는 지금처럼 `manual_review`로 보낸다 — 이러면 `triage`(AI가 함)와 `manual_review`(사람이 함)가 이름과 실제 행동이 어긋나지 않는다. **아직 구현하지 않음** — "누군가 원할 수도 있겠다"는 가정 단계일 뿐 구체적인 need가 아직 없어서, 실제로 사람에게 넘어가는 케이스 중 "이건 AI가 걸러줬어도 됐을 텐데"라는 구체적 사례가 쌓이기 전까지는 보류.
 - human_action의 action은 여전히 "라벨 + payload"로만 끝난다 — action이 실제로 다른 capability를 호출·연결하는 것(예: `"서류추가요청"`이 서류 재제출 처리 tool로 실제 핸드오프하는 것)은 의도적으로 미룬 범위다. 실제로 연결할 대상 capability가 생기면 그때 실행 로직을 얹기로 함(YAGNI로 미룬 것이지 빠뜨린 게 아님).
 - **미해결 논의 — `Orchestrator` 경계에 일반 예외 처리(구조화된 에러 응답)가 필요한가.** 지금 `Orchestrator.handle()`/`resume()`은 `AwaitingHumanAction` 하나만 특별 취급해서 `{"status": "awaiting_human_action", ...}`로 바꿔준다. 그 외 예외 — `GuardrailViolation`, `UnmappedValueError`, `MaxRetriesExceeded`, `judged`/`human_action`/`next` 위반의 `ValueError`, 어댑터 내부의 버그나 네트워크 에러까지 — 는 전부 어디서도 안 잡히고 호출자까지 그대로 터진다. 확인 중에 관련 gap도 하나 찾았다: `Tracer.span()`/`start_trace()`(`framework/harness/tracing.py`)가 `try/finally`만 써서, 예외로 끝나든 정상 종료든 "span end" 로그 줄이 똑같다 — 로그만 보고는 그 tool 호출이 성공했는지 터졌는지 구분이 안 된다. **아직 구현하지 않음** — 초기 단계에서는 안 막아야 버그가 바로(크래시로) 드러난다는 판단으로 의도적으로 보류했다. 채팅 UI 등에서 tool 하나의 실패로 전체 대화가 끊기면 안 되는 실제 배포 상황이 생기면, 그때 `AwaitingHumanAction`과 같은 패턴(`{"status": "error", "tool": ..., "error_type": ..., "detail": ...}`)으로 경계에서 잡아 구조화하고, tracing의 실패 표시 gap도 같이 고친다.

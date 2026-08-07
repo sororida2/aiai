@@ -12,6 +12,12 @@ from framework.workflow.state_machine import AwaitingHumanAction, StateMachine
 
 logger = get_logger("orchestrator")
 
+MAX_RESOLUTION_DEPTH = 3
+"""사전에 고정 조합으로 안 묶인 tool들을 그때그때 이어야 할 때(§ Orchestrator._resolve_missing_via_other_tool)
+재작성-재시도를 몇 번까지 허용할지의 상한. 모델이 계속 못 이으면 이 횟수 안에 원래 흐름으로
+돌아가 정직하게(TypeError로) 실패한다 — WorkflowRegistry의 max_retries와 같은 이유(무한 루프 방지)의
+Orchestrator 레벨 버전."""
+
 
 class AgentRunner(Protocol):
     """LLM 라우팅 판단 자체는 SDK(OpenAI Agents SDK 등)의 몫.
@@ -33,6 +39,16 @@ class AgentRunner(Protocol):
         조용히 잘못된 값이 들어가는 것보다 낫다.
         """
 
+    def rewrite_request(self, request: str, learned: dict[str, Any]) -> str:
+        """다른 tool을 불러서 알아낸 사실(learned)을 원래 요청에 반영해 자연어로 다시 쓴다.
+
+        예: "143.248.1.1이 위치한 나라의 대학 5개" + {"country": "United States"}
+        -> "미국의 대학 5개를 알려줘". 사전에 고정 조합(예: `subscription_weather_flow`)으로
+        묶어두지 않은 두 tool을 그때그때 이어야 할 때, `Orchestrator._resolve_missing_via_other_tool()`이
+        이걸 불러 요청 텍스트 자체를 갱신한 뒤 처음부터(`choose_tool()`부터) 다시 태운다 —
+        값을 kwargs에 직접 꽂는 게 아니라 "자연어가 base"라는 원칙을 그대로 지킨다.
+        """
+
 
 @dataclass
 class Orchestrator:
@@ -50,7 +66,10 @@ class Orchestrator:
         ]
 
     def handle(self, request: str, **kwargs: Any) -> dict[str, Any]:
-        logger.info("request received: %r kwargs=%s", request, kwargs)
+        return self._handle(request, kwargs, depth=0)
+
+    def _handle(self, request: str, kwargs: dict[str, Any], depth: int) -> dict[str, Any]:
+        logger.info("request received: %r kwargs=%s depth=%d", request, kwargs, depth)
         with tracer.start_trace(name="orchestrator") as trace:
             prompt = self.prompt_store.common_prompt()
             tool_name = self.agent_runner.choose_tool(request, self._catalog(), prompt)
@@ -70,6 +89,21 @@ class Orchestrator:
                 logger.info("arguments extracted from request: %s", extracted)
                 kwargs = {**extracted, **kwargs}  # 호출자가 준 값이 항상 우선(추측값을 덮어쓰지 못함)
 
+                # 요청 텍스트 자체에는 없어서 못 채운 필드가 남았다 — 사전에 고정 조합으로
+                # 안 묶인 다른 tool을 불러 알아낸 뒤, 그 사실을 반영해 요청을 다시 써서
+                # 처음부터(choose_tool부터) 재시도한다. depth로 무한 루프를 막는다.
+                still_missing = [name for name in missing_schema if name not in kwargs]
+                if still_missing and depth < MAX_RESOLUTION_DEPTH:
+                    rewritten = self._resolve_missing_via_other_tool(request, tool_name, still_missing)
+                    if rewritten is not None:
+                        logger.info("request rewritten to resolve %s: %r -> %r", still_missing, request, rewritten)
+                        return self._handle(rewritten, kwargs, depth + 1)
+                elif still_missing:
+                    logger.warning(
+                        "gave up resolving %s for tool '%s' after depth=%d — will fail on missing argument",
+                        still_missing, tool_name, depth,
+                    )
+
             with tracer.span(name=tool_name, kind="tool"):
                 try:
                     result = self.guardrails.run(tool_name, lambda: spec.func(**kwargs), kwargs)
@@ -78,6 +112,43 @@ class Orchestrator:
 
             logger.info("request done: tool=%s result_keys=%s", tool_name, list(result))
             return result
+
+    def _resolve_missing_via_other_tool(self, request: str, blocked_tool: str, missing_fields: list[str]) -> str | None:
+        """요청 텍스트에서 못 찾은 필드를, 다른 tool을 불러서 알아낸 뒤 요청을 다시 쓴다.
+
+        `subscription_weather_flow`처럼 사람이 미리 고정해둔 조합이 없는 두 tool을
+        그때그때 이어야 하는 경우를 위한 마지막 수단이다. 적당한 tool을 못 찾거나,
+        찾은 tool 호출 자체가 실패하면 `None`을 돌려주고 — 그러면 `_handle()`은 그냥
+        원래 흐름대로 진행해서 필수 인자 누락으로 정직하게 실패한다(조용히 삼키지 않음).
+        `AwaitingHumanAction`은 예외적으로 그대로 전파한다 — 이건 "이 시도가 실패했다"가
+        아니라 "사람 판단이 필요하다"는 별개의 신호라서다.
+        """
+        field_hint = ", ".join(missing_fields)
+        sub_request = f"다음 정보를 알아내려면 어떤 tool을 써야 하나: {field_hint} (원래 요청: {request!r})"
+        try:
+            sub_tool_name = self.agent_runner.choose_tool(sub_request, self._catalog(), self.prompt_store.common_prompt())
+        except ValueError:
+            logger.info("no supporting tool found for missing fields %s", missing_fields)
+            return None
+        if sub_tool_name == blocked_tool:
+            logger.info("supporting tool search returned the same blocked tool '%s' — giving up", blocked_tool)
+            return None
+
+        sub_spec = self.registry.tools().get(sub_tool_name)
+        if sub_spec is None:
+            return None
+
+        sub_kwargs = self.agent_runner.extract_arguments(request, sub_tool_name, sub_spec.input_schema, {})
+        logger.info("resolving via supporting tool '%s' with args %s", sub_tool_name, sub_kwargs)
+        try:
+            sub_result = self.guardrails.run(sub_tool_name, lambda: sub_spec.func(**sub_kwargs), sub_kwargs)
+        except AwaitingHumanAction:
+            raise
+        except Exception as e:
+            logger.warning("supporting tool '%s' failed while resolving %s: %s", sub_tool_name, missing_fields, e)
+            return None
+
+        return self.agent_runner.rewrite_request(request, sub_result)
 
     def resume(self, tool_name: str, context: dict[str, Any], step: str, action: dict[str, Any]) -> dict[str, Any]:
         """`handle()`이 돌려준 일시정지 응답("context"/"step")에 사람의 answer를

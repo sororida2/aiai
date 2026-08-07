@@ -65,6 +65,14 @@ class FirstMatchRunner:
         logger.debug("FirstMatchRunner.extract_arguments: request=%r -> %s (숫자 필드만 채움)", request, extracted)
         return extracted
 
+    def rewrite_request(self, request: str, learned: dict[str, Any]) -> str:
+        # 진짜 자연어 재작성이 아니라 거친 휴리스틱이다 — 알아낸 사실을 괄호로 덧붙일 뿐,
+        # "미국에 있는" 같은 자연스러운 삽입은 OpenAIRunner(실제 LLM) 쪽 몫으로 남겨둔다.
+        facts = ", ".join(f"{k}={v}" for k, v in learned.items())
+        rewritten = f"{request} ({facts})"
+        logger.debug("FirstMatchRunner.rewrite_request: %r + %s -> %r", request, learned, rewritten)
+        return rewritten
+
 
 class OpenAIRunner:
     """AgentRunner Protocol의 OpenAI 기반 구현체.
@@ -110,6 +118,17 @@ class OpenAIRunner:
             return {}
         return parsed
 
+    def rewrite_request(self, request: str, learned: dict[str, Any]) -> str:
+        user = (
+            f"원래 요청: {request}\n\n"
+            f"방금 다른 tool을 호출해서 알아낸 정보: {learned}\n\n"
+            "이 정보를 원래 요청에 반영해서, 같은 의도를 유지한 채 그 정보가 구체적으로 "
+            "드러나도록 자연어 요청을 다시 써라. 설명 없이 새로 쓴 요청 문장만 출력하라."
+        )
+        rewritten = complete(system="너는 요청을 방금 알아낸 정보로 자연어로 다시 쓰는 역할이다.", user=user).strip()
+        logger.debug("OpenAIRunner.rewrite_request: %r + %s -> %r", request, learned, rewritten)
+        return rewritten
+
 
 def build_orchestrator() -> Orchestrator:
     agent_runner: Any = OpenAIRunner() if os.environ.get("OPENAI_API_KEY") else FirstMatchRunner()
@@ -135,3 +154,4 @@ if __name__ == "__main__":
     print(orchestrator.handle("미국의 2026년 공휴일을 알려줘"))
     print(orchestrator.handle("미국 달러를 원화, 유로, 일본 엔으로 환전하면 얼마야?"))
     print(orchestrator.handle("A123 신청자의 진행상황과 그 지역 날씨를 알려줘"))
+    print(orchestrator.handle("143.248.1.1이 위치한 나라의 대학교 5개를 알려줘"))  # 고정 조합이 없는 두 tool을 동적으로 이어야 하는 경우
