@@ -29,6 +29,18 @@ def weather(location: str) -> dict[str, Any]:
 ```
 (`weather`, `applicant_list`가 이 패턴 — `applicant_list`는 어댑터 호출 뒤 `_render_table()`로 표현까지 조립한다.) `validate_tool_output(name, result)`(`framework/harness/guardrail.py`)은 선택이지만, tool의 output에 enum/optional 같은 세부 규칙이 있으면 반드시 부른다 — guardrail이 SDK 관례대로 tool 단위가 아니라 **Agent 단위**(`@output_guardrail`)로 옮겨가면서, 이제 어떤 tool이 결과를 만들었는지 그 자리에서 알 수 없어 tool별 세부 검증을 못 하기 때문이다(§ `ARCHITECTURE.md`의 "SDK 마이그레이션" 절, `harness/guardrail.py`의 `output_schema_guardrail` docstring).
 
+**(2026-08-07 추가) `input_schema`/`validate_tool_input(name, kwargs)`는 output과 대칭이지만 기본은 선언 안 하는 쪽이다.** SDK가 함수 시그니처(타입 힌트)로 하는 형태(shape) 체크는 자동이라 신경 쓸 필요 없다 — `input_schema`를 쓰는 건 그 이상의 **의미** 검증(값이 실제 유효한 닫힌 집합 안에 있는가)이 필요할 때만이다. 판단 기준: 이 인자를 사용자가 매번 직접 타이핑하는가, 아니면 다른 tool의 출력에서 모델이 그때그때 합성해서 채우는가 — 후자(다단계 tool 체이닝의 중간 인자)일수록 검증 없이는 잘못된 값이 그대로 다음 API 호출로 흘러갈 위험이 크다(`public_holiday`/`university_search`의 `country_code`가 실제 사례, `shared/countries.py`의 `ISO_3166_1_ALPHA2`를 재사용). 닫힌 집합이 자연스럽지 않은 자유 텍스트 인자(예: `weather`의 `location`)에는 굳이 선언하지 않는다.
+```python
+from shared.countries import ISO_3166_1_ALPHA2
+
+MY_TOOL_INPUT_SCHEMA = {"country_code": {"choices": sorted(ISO_3166_1_ALPHA2)}}
+
+@tool(name="...", description="...", output_schema=..., input_schema=MY_TOOL_INPUT_SCHEMA)
+def my_tool(country_code: str) -> dict[str, Any]:
+    validate_tool_input("...", {"country_code": country_code})  # 함수 본문 맨 앞
+    ...
+```
+
 **하나라도 있으면 — 파일 전용 `WorkflowRegistry` 인스턴스를 만든다.**
 ```python
 steps = WorkflowRegistry()          # 이 파일 전용 — 다른 서비스와 이름 겹쳐도 충돌 없음
@@ -117,7 +129,7 @@ def subscription_weather_flow(applicant_id: str) -> dict[str, Any]:
 
 - `steps.step()` 함수는 항상 `func(context: dict[str, Any]) -> str`. 반환 문자열이 그 스텝의 `next={...}` 키 밖이면 함수 반환 즉시 `ValueError`(`StateMachine.run()`까지 갈 필요도 없음).
 - `steps.judged()`/`steps.human_action()` 함수도 시그니처는 동일(`human_action`은 `dict`를 반환)하지만, 반환값이 `choices=(...)` 밖이면 데코레이터가 즉시 `ValueError`. 모델이 판단하면 `judged`, 사람이 판단하면 `human_action`(`manual_review` 참고 — 사람이 승인/반려/서류추가요청 중 고름). `human_action`은 유효한 action을 확인하면 `context["human_action"]`을 자동으로 지운다 — 같은 노드가 순환 안에서 다시 방문돼도 예전 답을 재사용하지 않고 새로 멈춘다.
-- 최상위 `@tool` 함수는 `input_schema`가 `inspect.signature`로 자동 추론되므로, 파라미터에 타입 힌트를 반드시 붙인다(예: `def subscription_status(applicant_id: str) -> dict[str, Any]`).
+- 최상위 `@tool` 함수는 파라미터에 타입 힌트를 반드시 붙인다(예: `def subscription_status(applicant_id: str) -> dict[str, Any]`) — SDK `function_tool()`이 이 시그니처에서 모델에게 노출할 JSON 스키마를 자동 추론한다. 이건 **형태(shape)** 체크(str/int 등)만 하는 것으로, 이 프로젝트가 별도로 선언하는 `@tool(input_schema=...)`(§2, 의미 검증)와는 다른 층이다 — 이름이 같아 헷갈리기 쉬우니 주의.
 
 ## 6. 순환/재시도 안전장치 (자동, 신경 안 써도 됨)
 
@@ -126,7 +138,7 @@ def subscription_weather_flow(applicant_id: str) -> dict[str, Any]:
 ## 7. 에러 포맷
 
 - `UnmappedValueError`(`framework/semantic/mapping.py`) — `mapping.json`에 없는 raw 코드값을 `normalize()`할 때, 또는 `MappedValue.require_confirmed()`를 `confidence != "confirmed"`인 값에 호출할 때. 삼키지 말고 그대로 전파시킨다.
-- `GuardrailViolation(stage, tool_name, detail)`(`framework/harness/guardrail.py`) — `validate_tool_output()`을 불렀는데 스키마 검증에 실패했을 때(선택적으로 부르는 fine-grained 검증, § 2/4). Agent 단위 `output_schema_guardrail`은 이제 막지 않고 관찰만 하므로, 실제로 tool 결과를 막고 싶으면 이 헬퍼를 직접 불러야 한다.
+- `GuardrailViolation(stage, tool_name, detail)`(`framework/harness/guardrail.py`) — `validate_tool_output()`/`validate_tool_input()`을 불렀는데 스키마 검증에 실패했을 때(선택적으로 부르는 fine-grained 검증, § 2/4). Agent 단위 `output_schema_guardrail`은 이제 막지 않고 관찰만 하고, input 쪽은 애초에 boundary에서 가로챌 지점 자체가 없으므로, 실제로 막고 싶으면 이 두 헬퍼를 직접 불러야 한다.
 - `MaxRetriesExceeded`(`framework/workflow/state_machine.py`) — §6 참고.
 - `judged`/`human_action`/`next` 위반은 별도 클래스 없이 평범한 `ValueError`다 — 메시지 프리픽스(`"judged node '...' returned"` / `"human_action '...' returned action"` / `"step '...' returned outcome"`)로 식별한다. `pausable=True` tool 안에서 이 `ValueError`가 나면(예: human_action의 bounded choices 위반) SDK가 삼키지 않고 밖으로 던지되 자기 `agents.exceptions.UserError`로 한 번 감싼다 — `main.py`의 `handle()`이 이미 이 언래핑을 처리하므로 새 pausable tool을 추가해도 신경 쓸 필요 없다.
 - 새 서비스에서 자체 예외를 추가할 경우, 이 네 가지 패턴(원인 그대로 전파 / 구조화된 메시지 / 카운터 기반 / 일반 ValueError) 중 성격이 가장 가까운 걸 따른다 — 새 예외 클래스를 함부로 늘리지 않는다.
@@ -140,6 +152,7 @@ def subscription_weather_flow(applicant_id: str) -> dict[str, Any]:
 - [ ] 새 tool이 다루는 개념(국가/통화/날짜 등)이 이미 등록된 다른 tool과 겹친다면, 같은 표현 규약을 쓰거나 최소한 파라미터 이름으로 그 차이가 드러나는가(§3, `limitation.md`)
 - [ ] inferred 매핑이 판단 분기(judged/human_action 이외)에 쓰이지 않는가
 - [ ] tool output에 enum/optional 같은 세부 규칙이 있다면 `validate_tool_output()`을 함수 본문에서 불렀는가(§2) — 안 부르면 Agent 단위 guardrail은 그 세부 규칙을 못 본다
+- [ ] tool의 인자 중 다른 tool의 출력에서 모델이 그때그때 합성해 채울 만한 것(다단계 체이닝의 중간 인자)이 있고, 그 값이 닫힌 집합(국가 코드 등)이라면 `input_schema`+`validate_tool_input()`을 붙였는가(§2) — 자유 텍스트 인자까지 굳이 다 붙일 필요는 없다
 - [ ] `human_action`을 쓰면 `@tool`에 `workflow_registry=steps`와 `pausable=True` 둘 다 넣었는가(§2)
 - [ ] (`WorkflowRegistry`를 쓰는 경우) `workflow.py` import 시점에 `steps.validate()`가 오류 없이 통과하는가
 - [ ] `python main.py`(또는 `registry.validate()`)가 등록/참조 무결성 오류 없이 통과하는가

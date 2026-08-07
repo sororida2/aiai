@@ -27,6 +27,7 @@ class ToolSpec:
     """`Agent(tools=[...])`에 그대로 넣을 SDK 객체."""
 
     output_schema: dict[str, Any] | None = None
+    input_schema: dict[str, Any] | None = None
     workflow_registry: WorkflowRegistry | None = None
 
     def __call__(self, *args: Any, **kwargs: Any) -> Any:
@@ -89,6 +90,7 @@ def tool(
     description: str,
     *,
     output_schema: dict[str, Any] | None = None,
+    input_schema: dict[str, Any] | None = None,
     workflow_registry: WorkflowRegistry | None = None,
     pausable: bool = False,
 ) -> Callable:
@@ -109,6 +111,13 @@ def tool(
     guardrail이 SDK 관례대로 Agent 단위(`@output_guardrail`, `harness/guardrail.py`)로
     옮겨갔기 때문에, 여기 저장해두는 스키마는 그 Agent 레벨 guardrail 함수가 실행 시점에
     `registry.tool_for(name).output_schema`로 찾아 쓰는 참고 자료일 뿐이다.
+
+    `input_schema`도 같은 성격이다 — SDK가 함수 시그니처로 하는 타입 체크(str/int 등 형태만)
+    이상의 의미 검증(예: country_code가 실제 유효한 alpha-2 코드인가)이 필요한 tool만 선언한다.
+    검증은 여기서 하지 않고, `harness/guardrail.py`의 `validate_tool_input(name, kwargs)`를
+    tool 함수 본문 맨 앞에서 opt-in으로 불러야 실제로 차단된다 — 특히 다단계 tool 체이닝에서
+    모델이 이전 tool의 출력으로 다음 tool의 인자를 스스로 합성하는 경우, 그 값이 사용자가
+    직접 준 게 아니라서 검증 없이 그대로 다음 API 호출에 흘러갈 위험이 더 크다.
 
     `workflow_registry`는 이 tool 내부에 `human_action`(pause 가능) 노드가 있을 때만
     넘긴다 — 멈췄던 지점을 재개하는 resume 로직이 그 tool 전용 `WorkflowRegistry`를 찾아야
@@ -140,6 +149,7 @@ def tool(
                 func=actual_func,
                 function_tool=wrapped,
                 output_schema=output_schema,
+                input_schema=input_schema,
                 workflow_registry=workflow_registry,
             )
         )

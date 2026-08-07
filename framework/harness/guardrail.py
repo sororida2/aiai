@@ -10,7 +10,14 @@ from framework.registry.decorators import registry
 
 logger = get_logger("guardrail")
 
-__all__ = ["output_schema_guardrail", "GuardrailViolation", "OptionalField", "optional", "validate_tool_output"]
+__all__ = [
+    "output_schema_guardrail",
+    "GuardrailViolation",
+    "OptionalField",
+    "optional",
+    "validate_tool_input",
+    "validate_tool_output",
+]
 
 
 class GuardrailViolation(Exception):
@@ -19,6 +26,29 @@ class GuardrailViolation(Exception):
         self.stage = stage
         self.tool_name = tool_name
         self.detail = detail
+
+
+def validate_tool_input(tool_name: str, kwargs: dict[str, Any]) -> dict[str, Any]:
+    """`registry.tool_for(tool_name).input_schema`로 인자를 검증하고 그대로 돌려준다.
+
+    `validate_tool_output()`과 대칭인 opt-in 헬퍼 — SDK `function_tool()`이 함수 시그니처로
+    하는 타입 체크(str/int 등 형태만)로는 못 잡는 의미 검증(예: country_code가 실제 유효한
+    alpha-2 코드인가)이 필요한 tool만 함수 본문 맨 앞에서 명시적으로 부른다.
+
+    특히 다단계 tool 체이닝(예: ip_geolocation의 출력을 모델이 다음 tool의 인자로 합성해
+    이어 부르는 경우, § ARCHITECTURE.md의 "SDK 마이그레이션" 절)에서 이 검증이 더 중요하다 —
+    그 값은 사용자가 직접 준 게 아니라 모델이 실행 시점에 만들어낸 것이라 잘못 채워질 여지가
+    더 크고, 검증 없이 그대로 다음 API 호출에 흘러가면 의미 없는 HTTP 에러로만 터지거나
+    (예: public_holiday) 최악의 경우 조용히 엉뚱한 값으로 성공해버릴 수 있다.
+    """
+    spec = registry.tool_for(tool_name)
+    try:
+        validate_schema(kwargs, spec.input_schema)
+    except SchemaViolation as e:
+        logger.error("input: '%s' guardrail failed — %s", tool_name, e.detail)
+        raise GuardrailViolation("input", tool_name, e.detail) from e
+    logger.debug("'%s' input validated ok", tool_name)
+    return kwargs
 
 
 def validate_tool_output(tool_name: str, output: dict[str, Any]) -> dict[str, Any]:

@@ -169,11 +169,11 @@ def _paused_response(e: AwaitingHumanAction) -> dict[str, Any]:
 
 
 if __name__ == "__main__":
-    print(handle("applicant_list 보여줘")["table"])
-    print(handle("서울 날씨 알려줘"))  # weather 단독 — 아직 안 돌려본 경로
-    print(handle("미국에 있는 대학 5개만 보여줘"))
-    print(handle("143.248.1.1의 위치한 나라를 알려줘"))
-    print(handle("미국의 2026년 공휴일을 알려줘"))
-    print(handle("미국 달러를 원화, 유로, 일본 엔으로 환전하면 얼마야?"))
-    print(handle("A123 신청자의 진행상황과 그 지역 날씨를 알려줘"))
-    print(handle("143.248.1.1이 위치한 나라의 대학교 5개를 알려줘"))  # 고정 조합이 없는 두 tool을 동적으로 이어야 하는 경우
+    #print(handle("applicant_list 보여줘")["table"])
+    #print(handle("서울 날씨 알려줘"))  # weather 단독 — 아직 안 돌려본 경로
+    #print(handle("미국에 있는 대학 5개만 보여줘"))
+    #print(handle("143.248.1.1의 위치한 나라를 알려줘"))
+    print(handle("그리스의 2026년 공휴일을 알려줘"))
+    #print(handle("미국 달러를 원화, 유로, 일본 엔으로 환전하면 얼마야?"))
+    #print(handle("A123 신청자의 진행상황과 그 지역 날씨를 알려줘"))
+    #print(handle("143.248.1.1이 위치한 나라의 대학교 5개를 알려줘"))  # 고정 조합이 없는 두 tool을 동적으로 이어야 하는 경우
