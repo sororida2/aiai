@@ -1,0 +1,41 @@
+﻿청약진행상황 AI Agent — 서브시스템 도출 및 SDK 커버리지 분석 (공개 LLM: Qwen3.8 적용안),,,,,,,,,,,,,,,,,,,
+설계서 v1.0(2026-08-03) 기준 | UI 계약: agent-ui protocol v1.1 | 스택: Python + OpenAI Agents SDK + Qwen(자체호스팅 vLLM / OpenAI 호환 엔드포인트) | 커버리지는 'Qwen 사용 시' 기준으로 재평가,,,,,,,,,,,,,,,,,,,
+,,,,,,,,,,,,,,,,,,,
+No,계층,서브시스템,핵심 기능 (쉬운 설명),위치,구분,"파일럿
+우선순위","SDK
+커버리지",역할,KB라이프 예제,대응 SDK 기능,자체개발영역,,커버리지 요약,,,,,,
+1,상태,Session Store,이전 턴의 LLM 대화 내용을 저장·복원해 멀티턴이 이어지게 함,core/session.py,core,필수,SDK 제공,이전 대화 내용을 저장했다가 다음 턴에 합산 리턴하기 위한 저장장치,OpenAI Agent SDK,Session / SQLiteSession (자동 히스토리 관리) — 모델 무관,"저장소 경로·TTL·정리 정책, 세션ID 발급 규약",,구분,서브시스템 수,비중,,,,
+2,실행,"Agent Loop 
+(Runner)",LLM 호출 → 툴 실행 → 결과 재투입을 작업이 끝날 때까지 반복하는 핵심 루프,"core/runtime.py 
+(얇은 배선 래퍼, 약 30줄)",core,필수,SDK 제공,LLM 호출과 툴 실행을 답이 완성될 때까지 반복 호출 수행,OpenAI Agent SDK,Runner.run / run_streamed (툴 루프·handoff 전환 내장) — SDK 레벨 로직이라 모델 교체 영향 없음,"루프 자체는 구현 대상 아님(SDK가 전부 수행). 우리 몫은 Runner.run 호출 파라미터 '조립'뿐 — session(1번)·BizContext(3번)·hooks(15번)·guardrail(5번)·RunConfig(model_provider, 6번)를 한 곳에서 배선. [Qwen] 스트리밍 tool call 버퍼링(use_responses=False), usage 집계(include_usage=True), 모델 서버 타임아웃·재시도가 걸리는 지점이라 파일 분리 시 6·14번과의 결합 지점이 명확해짐",,부분 커버,8,,,,,
+3,상태,BizContext,"고객ID, 선택된 계약번호, 현재 flow 단계 등 '업무 상태'를 구조화해 보관",core/context.py,core,필수,부분 커버,진행 단계별 기호화된 획득 정보(코드)를 저장해두는 상태 보관소,locationCode: ,SDK: RunContextWrapper[BizContext] (실행 중 전달 그릇) — 모델 무관,"BizContext 모델 정의, 세션ID별 영속화/로드 로직",,합계,22,100%,,,,
+4,계약,"UI Schema 
+(UIResponse Pydantic)",응답 형식을 코드 레벨에서 강제. 에이전트가 자유 텍스트 대신 정해진 JSON 구조만 내도록 고정,core/ui_schema.py,core,필수,부분 커버,"프론트와 서버가 공유하는 응답 JSON 구조 선언(5,14에서 활용)",,output_type=UIResponse (response_format json_schema로 전달),"agent-ui v1.1 전체 Pydantic 모델 정의/이관, [Qwen] 서빙이 json_schema(guided decoding)를 지원해야만 성립 → 스키마 단순화·필드 축약으로 준수율 확보 (폴백은 14번)",,,,,,,,
+5,품질,"Output Guardrail
+(Structure Harness) 
+","응답이 나갈 때마다 검사: 버튼 id 중복, sent_to 화이트리스트, 위험 액션 confirm 유무, 주민번호 노출 등",core/harness/output_rules.py,core,필수,부분 커버,"전사공통정책, 출력 직전(1번) 버튼 중복·민감정보 노출·허용 대상 위반을 걸러내는 최종 검사 게이트(4 참조) ",,@output_guardrail + tripwire (검사 훅·차단 메커니즘) — SDK 훅 기반이라 모델 무관,"정책 규칙 함수(run_policy_rules) 전부, 위반 시 대체 응답. [집행 지점] 출력 직전 최종 게이트 — 주민번호 등 민감정보 노출 검사는 9번 core/masking.py의 규칙을 import해 실행(규칙 중복 정의 금지). 버튼 id 중복·sent_to 화이트리스트·위험 액션 confirm 검사 포함. [Qwen] 스키마 이탈 출력이 늘어나므로 검사 항목 확대",,,,,,,,
+6,인프라,"Model Provider 
+추상화",어떤 LLM(OpenAI/Qwen)을 어디로 호출할지 한 곳에서 결정. 모델 교체를 파일 1개 수정으로 끝냄,core/model_provider.py,core,필수,부분 커버,호출 모델 관리(스위치),,AsyncOpenAI(base_url=...)+OpenAIChatCompletionsModel / LitellmModel / RunConfig(model_provider=...),"Qwen 엔드포인트·키·모델명 설정 외부화(ENV), Agent별 모델 매핑, 타임아웃·재시도·폴백(모델 다운 시 대체), Agent(model=""문자열"") 직접지정 금지 규약",,,,,,,,
+7,운영,"Observability 
+(Tracing/로깅)",모델 호출·툴 호출·handoff·가드레일까지 한 줄기로 기록해 실패를 재현·분석,core/observability/tracing.py,core,필수,자체 개발,모델·툴·handoff 호출 로그,,TracingProcessor 인터페이스·set_trace_processors 훅만 제공 (내장 대시보드는 OpenAI 전용),"[Qwen] 트레이스가 OpenAI로 안 가므로 자체 프로세서 구축(OTel/파일/DB), set_tracing_disabled 처리로 401 방지, 저장 직전 마스킹 파이프(9번 core/masking.py 규칙 import — 규칙 이원화 금지), conversation_id 라벨링, 턴 트리 조회 UI, 메타/원문 분리 보존 정책, 하네스 위반율·폴백 발동율 지표화(20번 연계). ※ 구현 항목 7건 상세는 Observability 시트 참조",,자체 개발,12,,,,,
+8,진입/제어,"Chat Gateway 
+(FastAPI)",사용자 입력(/chat)과 버튼 클릭(/chat/action)을 받는 단일 창구. sent_to 값을 보고 'agent' 또는 'api:*'로 갈라 보냄,core/gateway.py,core,필수,자체 개발,사용자 입력과 버튼 클릭을 모두 받아 처리 경로를 갈라주는 단일 진입 창구,,Runner.run 호출부만 SDK,"FastAPI 엔드포인트, sent_to 라우팅, postback→정형텍스트 변환, 타임아웃 정책(자체 GPU 지연 반영)",,,,,,,,
+9,보안,인증·개인정보 경계,"로그인 세션에서 customer_id를 먼저 확정. LLM은 '누구 데이터인지' 결정하지 못하게 막고, 출력은 마스킹된 값만","core/auth.py, core/masking.py",core,필수,자체 개발,로그인 신원으로 조회 대상을 먼저 확정하고 민감정보를 가리는 보안 경계선,,context 주입 패턴(RunContextWrapper)만 제공,"인증 연동, customer_id 확정, [SSOT] 개인정보 판별·마스킹 규칙 정의(주민번호/계좌/연락처 정규식·마스킹 함수)를 core/masking.py 한 곳에 정의 → 5번 구조 하네스·7번 관측성이 import해 집행. 입력측(LLM 투입 전) 필터도 여기 담당. [Qwen] 온프레미스 자체호스팅이라 외부 전송이 없어 규제 대응상 유리 → 대신 GPU 노드 접근통제·로그 보관 정책 필요",,,,,,,,
+10,확장성,Service Registry,서비스 1개 = 폴더 1개. 선언적 등록만으로 ①선택 메뉴 ②triage handoff ③eval 대상이 자동 생성,core/registry.py,core,필수,자체 개발,서비스 하나를 선언만 하면 메뉴·라우팅·테스트에 자동 편입시키는 등록 창구,,해당 없음,"ServiceDefinition 데이터클래스, register(), 메뉴/triage 빌더, 서비스별 모델 지정 필드(model) 추가",,,,,,,,
+11,연동,Legacy Adapter,청약진행단계확인 API 1종 + 상세 API 3종을 감싸 타임아웃·재시도·에러 표준화,core/adapters/legacy.py,core,필수,자체 개발,레거시 API를 타임아웃·재시도·에러 규격으로 감싸 안정화하는 연동 래퍼,,해당 없음,"API 클라이언트, 재시도/타임아웃, 응답 정규화, 목(mock). 서비스 추가 시 함수만 증분",,,,,,,,
+12,실행,API Handler Registry,"서류 재발송' 같은 실행성 액션을 LLM 없이 결정적으로 처리. sent_to=""api:<name>"" 매핑 테이블",core/api_handlers.py,core,필수,자체 개발,재발송 같은 실행성 액션을 LLM 없이 정해진 코드로 처리하는 결정적 실행 경로,,해당 없음 (의도적으로 LLM 미사용 경로),"핸들러 등록 테이블, 각 핸들러 구현, 결과 UIResponse 생성. [Qwen] 모델 품질 편차를 피하는 결정적 경로이므로 비중 확대 권고",,,,,,,,
+13,UX,에러/폴백 UX,레거시 장애·LLM 실패·하네스 위반 시 표준 에러 화면(+상담사 연결 버튼)을 서버가 직접 내려줌,core/errors.py,core,필수,자체 개발,장애나 실패가 났을 때 표준 에러 화면과 대안 버튼을 내려주는 안전 출구,,가드레일 예외 타입만 제공,"표준 에러 UIResponse 템플릿, 장애 유형별 분기. [Qwen] 구조화 출력 파싱 실패·모델 서버 다운(5xx) 분기 신설",,,,,,,,
+14,계약,구조화 출력 폴백·검증 래퍼 (신규),Qwen이 UIResponse JSON을 깨뜨렸을 때 잡아내고 재시도·복구하는 안전망,core/structured_output.py,core,필수,자체 개발,깨진 JSON을 잡아 재시도하고 끝내 실패하면 에러 화면으로 강등시키는 출력 안전망(4 참조),,해당 없음 — SDK는 파싱 실패 시 예외만 반환,"json_schema 지원 여부 사전 점검(부팅 시 self-check), 파싱 실패 재시도(스키마 힌트 재주입), 최종 실패 시 13번 표준 에러 UIResponse로 강등, 실패율 지표화",,,,,,,,
+15,품질,"Flow Harness
+(FlowSpec + Hooks)","조회→선택→심화조회' 순서를 상태기계로 선언하고, 툴 호출 시점마다 허용 여부·선행조건을 대조",core/harness/hooks.py (엔진) + services/process_status/flow.py (선언),core + services,필수,부분 커버,"각 Agent별, 정해진 업무 절차/가이드를 벗어난 툴 호출을 매 시점 대조/점검. Loop시마다 체크.",,AgentHooks.on_tool_start / on_tool_end (훅 포인트) — 모델 무관,"FlowSpec·StateRule 설계, 상태 전이 엔진, warn→block 정책. [Qwen] 순서 이탈이 늘 수 있어 block 전환 기준 강화",,,,,,,,
+16,오케스트레이션,Service Agent (청약진행상황),실제 업무를 수행하는 전문 에이전트. 지시문 + 툴 + UIResponse 구조화 출력,services/process_status/agent.py,services,필수,부분 커버,지시문과 툴을 들고 실제 청약 업무를 수행하는 담당 전문 에이전트,,"Agent(instructions, tools, output_type, model)","업무 규칙 instructions, 드릴다운 진행 규칙. [Qwen] 긴 지시문 준수율 저하 → 지시문 분할·짧게, few-shot 보강, handoff_description 필수 기재",,,,,,,,
+17,연동,Function Tools,레거시 API를 LLM이 호출 가능한 '도구'로 노출. 인자 스키마는 타입에서 자동 생성,services/process_status/tools.py,services,필수,부분 커버,레거시 조회 기능을 LLM이 직접 부를 수 있게 노출해주는 업무 도구 모음,,@function_tool (스키마 자동생성 + Pydantic 검증),"툴 함수 본체, context에서 customer_id 주입 규약. [Qwen] 툴 개수·인자 단순화, 오호출 대비 인자 검증/재질의",,,,,,,,
+18,프레젠테이션,Frontend Renderer (agent-ui v1.1),서버가 내려준 JSON(UIResponse)을 그대로 화면에 그리기만 하는 '멍청한 렌더러'. 판단 로직 없음,web/ (별도 리포지토리),frontend (경계 밖),필수,자체 개발,서버가 내려준 JSON을 판단 없이 화면에 그리기만 하는 표시 전용 렌더러,,해당 없음 (SDK 범위 밖),"블록/버튼 렌더러, postback 전송 로직 전부",,,,,,,,
+19,오케스트레이션,Triage Agent (라우팅),사용자 자연어를 보고 어떤 서비스 담당 에이전트로 넘길지 판단해 handoff,core/triage.py,core,선택,부분 커버,사용자 말을 읽고 담당 서비스 에이전트로 넘겨주는 라우팅 안내 데스크,,Agent(handoffs=[...]) — handoff는 transfer_to_* function tool로 노출,"[Qwen] 서빙단 tool-call 파서 활성화(--enable-auto-tool-choice, --tool-call-parser) 검증, handoff_description 주입, RECOMMENDED_PROMPT_PREFIX, 오라우팅 회귀 테스트",,SDK 제공,2,,,,,
+20,품질,Eval Runner (자동 테스트 루프),골든 시나리오를 멀티턴+버튼클릭까지 재생하고 3단(구조/내용/품질) 판정 후 리포트,evals/runner.py,core,선택,자체 개발,골든 시나리오를 자동 재생해 이전 대비 품질이 깨졌는지 판정하는 자동 테스트 루프,,해당 없음 — 플랫폼 Evals·trace grading은 OpenAI 트레이스 전제라 사용 불가,"시나리오 재생기, 버튼 클릭 시뮬레이션, mock 주입, 스코어링·리포트, CI 연동, [Qwen] OpenAI 모델 대비 A/B 회귀 비교 하네스",,,,,,,,
+21,품질,LLM Judge,자동 판정이 어려운 '정확성/톤/개인정보 노출'을 LLM이 rubric으로 pass·fail 채점,evals/judge.py,core,선택,자체 개발,규칙으로 못 잡는 정확성·톤·개인정보 노출을 사후에 채점하는 품질 심판,,해당 없음 — 플랫폼 LLM grader 미사용,"judge 호출부 자체 구현, judge 프롬프트·rubric 설계/버전 관리, [Qwen] 판정 모델 분리 정책(판정은 상위 모델 고정 권고) 정규식으로 못 잡는 개인정보 노출을 rubric으로 사후 채점. 런타임 차단 수단이 아니라 테스트 단계 검증.",,,,,,,,
+22,운영,프롬프트·정책 버전 관리,instructions·flow_spec·judge 프롬프트에 버전을 붙여 모델 교체 전후를 비교 가능하게 함,core/versioning.py + config/prompts/,core + services,선택,자체 개발,지시문과 정책에 버전을 붙여 모델 교체 전후를 비교 가능하게 만드는 기준선 관리,,해당 없음,"git 태그 규약, 버전 메타데이터, 기준선 대비 비교 룰. [Qwen] 모델명·서빙 파라미터(temperature, guided decoding)도 버전 축에 포함 필수",,,,,,,,
+,,,,,,,,,,,,,,,,,,,
+"※ 신설·변경 이력: Qwen 전환으로 신설된 서브시스템 = 6번(Model Provider 추상화), 14번(구조화 출력 폴백·검증 래퍼). ※ 본문 내 'N번' 참조는 현재 정렬 기준의 No 열을 가리킵니다.",,,,,,,,,,,,,,,,,,,
+,,,,,,,,,,,,,,,,,,,
+,"인증: 업계 표준은 ""Agent를 신뢰 경계 안쪽에 두지 않음""을 적용. LLM이 customer_id를 인자로 받는 순간 프롬프트 인젝션으로 타인 데이터 조회가 가능해질 수 있기에 인자로 넘기지 않고 ctx.context에서 주입",,,,,,,,,,,,,,,,,,

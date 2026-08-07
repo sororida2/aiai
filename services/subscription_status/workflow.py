@@ -2,8 +2,8 @@ from __future__ import annotations
 
 from typing import Any
 
-from framework.harness.guardrail import optional
-from framework.registry.decorators import guardrail, tool
+from framework.harness.guardrail import optional, validate_tool_output
+from framework.registry.decorators import tool
 from framework.workflow.registry import WorkflowRegistry
 from framework.workflow.state_machine import AwaitingHumanAction, StateMachine
 from services.subscription_status.adapter import SubscriptionStatusAdapter
@@ -79,10 +79,13 @@ SUBSCRIPTION_STATUS_OUTPUT_SCHEMA = {
         "청약 신청자의 진행상황을 조회한다. 내부적으로 상태 재조회/재제출대기/"
         "수동검토까지 이어지는 고정 서브 workflow 전체를 하나의 capability로 실행한다."
     ),
-    workflow_registry=steps,  # manual_review가 pause할 수 있어 Orchestrator.resume()이 필요로 함
+    output_schema=SUBSCRIPTION_STATUS_OUTPUT_SCHEMA,
+    workflow_registry=steps,  # manual_review가 pause할 수 있어 resume()이 필요로 함
+    pausable=True,  # manual_review의 AwaitingHumanAction이 SDK에게 삼켜지지 않고 그대로
+                     # 전파되도록 function_tool(failure_error_function=None) 옵트아웃
+                     # (§ registry/decorators.py, § human-in-the-loop)
 )
-@guardrail(output_schema=SUBSCRIPTION_STATUS_OUTPUT_SCHEMA)
 def subscription_status(applicant_id: str) -> dict[str, Any]:
     context: dict[str, Any] = {"applicant_id": applicant_id, "adapter": SubscriptionStatusAdapter()}
     build_state_machine().run(context)
-    return context["last_result"]
+    return validate_tool_output("subscription_status", context["last_result"])

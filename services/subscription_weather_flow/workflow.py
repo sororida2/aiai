@@ -2,7 +2,9 @@ from __future__ import annotations
 
 from typing import Any
 
-from framework.registry.decorators import guardrail, registry, tool
+from framework.harness.guardrail import GuardrailViolation
+from framework.harness.schema import SchemaViolation, validate_schema
+from framework.registry.decorators import registry, tool
 from framework.workflow.registry import WorkflowRegistry
 from framework.workflow.state_machine import StateMachine
 
@@ -12,11 +14,9 @@ steps = WorkflowRegistry()
 @steps.step(order=1, next={"완료": "query_weather"})
 def query_subscription(context: dict[str, Any]) -> str:
     # 다른 서비스의 함수를 직접 import하지 않는다 — 이름(문자열)만 알면 되도록 전역
-    # ToolRegistry에서 런타임에 찾는다. 오케스트레이터가 tool을 고를 때와 같은 원칙
-    # ("엔진은 tool 이름 문자열에만 커플링된다")을 서비스 간 호출에도 그대로 적용한 것.
-    # 함수 본문 안에서(모듈 로드 시점이 아니라) 찾기 때문에 discover_services()가
-    # 서비스를 어떤 순서로 import하든 안전하다 — 실제 호출 시점엔 전부 등록이 끝나 있다.
-    # tool_for()가 돌려주는 ToolSpec 자체가 호출 가능해서(.__call__) .func를 몰라도 된다.
+    # ToolRegistry에서 런타임에 찾는다. tool_for()가 돌려주는 ToolSpec 자체가 호출
+    # 가능해서(.__call__ -> .func) SDK를 거치지 않고 원본 함수를 바로 부른다 —
+    # SDK function_tool로 감싼 버전은 JSON 문자열 인자를 받아서 이런 직접 합성엔 안 맞는다.
     subscription_status = registry.tool_for("subscription_status")
     context["subscription_result"] = subscription_status(applicant_id=context["applicant_id"])
     return "완료"
@@ -45,16 +45,20 @@ def build_state_machine() -> StateMachine:
         "subscription_status 조회 결과의 region 값을 그대로 weather의 입력으로 사용한다."
     ),
 )
-@guardrail(
-    # dict 자체는 진짜 dict — 다만 각 값이 registry.schema_for()가 돌려주는 thunk라,
-    # discover_services()가 이 파일을 weather보다 먼저 import해도(알파벳 순서) 문제없다.
-    # 실제 스키마는 검증 시점(tool이 호출될 때)에 validate_schema()가 풀어서 읽는다.
-    output_schema={
-        "subscription": registry.output_schema_for("subscription_status"),
-        "weather": registry.output_schema_for("weather"),
-    }
-)
 def subscription_weather_flow(applicant_id: str) -> dict[str, Any]:
     context: dict[str, Any] = {"applicant_id": applicant_id}
     build_state_machine().run(context)
-    return {"subscription": context["subscription_result"], "weather": context["weather_result"]}
+    result = {"subscription": context["subscription_result"], "weather": context["weather_result"]}
+
+    # 중첩 스키마는 호출 시점(여기)에 다른 두 tool의 output_schema를 조회해서 조립한다 —
+    # discover_services()가 이 파일을 어떤 순서로 import하든(알파벳상 weather보다 먼저 와도)
+    # 실제 호출은 항상 모든 서비스 등록이 끝난 뒤 일어나므로 안전하다.
+    nested_schema = {
+        "subscription": registry.tool_for("subscription_status").output_schema,
+        "weather": registry.tool_for("weather").output_schema,
+    }
+    try:
+        validate_schema(result, nested_schema)
+    except SchemaViolation as e:
+        raise GuardrailViolation("output", "subscription_weather_flow", e.detail) from e
+    return result

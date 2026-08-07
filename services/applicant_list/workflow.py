@@ -2,8 +2,11 @@ from __future__ import annotations
 
 from typing import Any
 
-from framework.registry.decorators import guardrail, tool
+from framework.harness.guardrail import validate_tool_output
+from framework.registry.decorators import tool
 from services.applicant_list.adapter import ApplicantListAdapter
+
+APPLICANT_LIST_OUTPUT_SCHEMA = {"applicants": Any, "table": Any}
 
 
 def _render_table(applicants: list[dict[str, Any]]) -> str:
@@ -22,8 +25,9 @@ def _render_table(applicants: list[dict[str, Any]]) -> str:
         "그 사람의 applicant_id를 이 목록에서 찾아 subscription_status(applicant_id=...)로 "
         "이어서 조회해야 한다 — applicant_list 자체는 상세 조회 기능이 없다."
     ),
+    output_schema=APPLICANT_LIST_OUTPUT_SCHEMA,
 )
-@guardrail(output_schema={"applicants": Any, "table": Any})
 def applicant_list() -> dict[str, Any]:
     applicants = ApplicantListAdapter().execute()["applicants"]
-    return {"applicants": applicants, "table": _render_table(applicants)}
+    result = {"applicants": applicants, "table": _render_table(applicants)}
+    return validate_tool_output("applicant_list", result)

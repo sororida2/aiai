@@ -64,10 +64,10 @@ Triage Agent가 Tool 스키마를 참조해 판단하고, 단일 tool을 직접 
 
 모델/agent의 개별 실행을 감싸서 검증·관측·제어하는, 모델 자체와는 분리된 주변 인프라 계층. "관찰자"가 아니라 **개입 권한을 가진 계층**이다 — guardrail은 조건에 안 맞으면 그 자리에서 흐름을 중단시킨다.
 
-- **Input Guardrail** → **Tool 실행** → **Output Guardrail** → **응답 반환** 순으로 체인이 걸리며, 어느 단계든 실패하면 즉시 차단 + 로그로 빠진다.
-- **Tracing**: 하나의 요청(Trace) 안에 Orchestrator Span이 있고, 그 안에 개별 tool 호출들이 각자의 Tool Span으로 중첩 기록된다. Tool Span이 늘어나도 상위 구조는 그대로 유지된다.
+- **Tool 실행** → **Output 검증** 순으로 걸린다. (**(2026-08-07 업데이트)** OpenAI Agents SDK 도입 이후, Output 검증은 두 층이다 — Agent 단위 `@output_guardrail`은 차단 권한 없이 관찰만 하고, 실제 차단은 각 tool 함수 본문이 opt-in으로 부르는 `validate_tool_output()`이 한다. Input 쪽은 SDK가 함수 시그니처로 하는 타입 체크가 전부이고, 이 프로젝트가 별도로 가로채 검증하는 계층은 이제 없다 — `ARCHITECTURE.md`의 "SDK 마이그레이션" 절 참고.)
+- **Tracing**: 하나의 요청(Trace) 안에 개별 tool 호출들이 각자의 Tool Span으로 중첩 기록된다. Tool Span이 늘어나도 상위 구조는 그대로 유지된다.
 
-**Tool-하네스 결합**: 하네스는 tool과 결합되지만 강결합은 아니다. 결합되는 건 하네스 엔진(guardrail 체인 실행기)이 아니라, tool이 자신의 출력 스키마·guardrail 규칙을 "선언"한 것을 하네스가 읽어서 실행하는 형태다. 오케스트레이터가 tool의 입력 스키마에 커플링되는 것과 같은 축의, 반대 방향 커플링이다. `@guardrail(output_schema=...)`처럼 규칙을 tool 옆에 선언해두면 느슨한 결합, 하네스 엔진 코드 안에 `if tool_name == "legacy_a": ...` 식 분기가 생기면 그게 진짜 강결합(안티패턴)이다.
+**Tool-하네스 결합**: 하네스는 tool과 결합되지만 강결합은 아니다. 결합되는 건 하네스 엔진이 아니라, tool이 자신의 출력 스키마를 "선언"한 것을 하네스가 읽어서 실행하는 형태다. 오케스트레이터가 tool의 입력 스키마에 커플링되는 것과 같은 축의, 반대 방향 커플링이다. `@tool(output_schema=...)`처럼 규칙을 tool 옆에 선언해두면 느슨한 결합, 하네스 엔진 코드 안에 `if tool_name == "legacy_a": ...` 식 분기가 생기면 그게 진짜 강결합(안티패턴)이다.
 
 ## 레거시 통합 — semantic 매핑
 
@@ -95,9 +95,9 @@ Claude connector 등이 쓰는 MCP(Model Context Protocol)는 지금까지 설�
 
 이건 결함이 아니라 위 "레거시 통합" 절에서 이미 선택한 트레이드오프(감사 가능성을 위해 AI의 자유를 미리 좁혀둔다)의 다른 얼굴이다. 실제로 tool 선택 vs 인자 채우기를 나눠 실험해본 근거와 상세 논의는 `limitation.md` 참고.
 
-**(업데이트) 인자 채우기도 이후 `AgentRunner.extract_arguments()`로 실제 동작하게 만들었다** — `orchestrator.handle("미국에 있는 대학 5개만 보여줘")`처럼 자연어만 던져도 라우팅+인자 채움이 끝까지 돈다. 다만 이건 위에서 말한 "다리가 없으면 못 잇는다"는 한계를 없앤 게 아니라, 그 다리가 없는 자리를 모델의 자유 생성으로 덮어버린 것뿐이다 — 결과가 맞는지 감사할 방법은 여전히 없다(`limitation.md`의 "업계 비교" 절에 상세).
+**(업데이트) 인자 채우기도 실제 동작하게 만들었다** — 처음엔 이 프로젝트가 직접 구현한 `AgentRunner.extract_arguments()`로, 이후 OpenAI Agents SDK 도입으로 SDK `Agent`+`Runner`의 기본 tool-calling으로 대체됐다(`handle("미국에 있는 대학 5개만 보여줘")`처럼 자연어만 던져도 라우팅+인자 채움이 끝까지 돈다). 다만 이건 위에서 말한 "다리가 없으면 못 잇는다"는 한계를 없앤 게 아니라, 그 다리가 없는 자리를 모델의 자유 생성으로 덮어버린 것뿐이다 — 결과가 맞는지 감사할 방법은 여전히 없다(`limitation.md`의 "업계 비교" 절에 상세).
 
-**(업데이트) "고정 조합 없는 두 tool을 그때그때 잇는" 것도 시도해봤다** — "143.248.1.1이 위치한 나라의 대학교 5개를 알려줘"처럼 한 tool에 필요한 인자가 다른 tool의 결과여야 하는 경우, `Orchestrator._resolve_missing_via_other_tool()` + `AgentRunner.rewrite_request()`가 지원 tool을 찾아 불러 결과를 자연어에 반영해 요청을 다시 쓰고 재시도한다. 이것도 다리를 새로 놓는 게 아니라 "이미 등록된 다른 tool 중 도움이 될 걸 찾아 그때그때 밟는" 것뿐이라 — 못 찾거나 실패하면 조용히 숨기지 않고 원래대로 정직하게 실패한다(`ARCHITECTURE.md`/`limitation.md`에 구현·한계 상세).
+**(업데이트) "고정 조합 없는 두 tool을 그때그때 잇는" 것도 시도해봤다** — "143.248.1.1이 위치한 나라의 대학교 5개를 알려줘"처럼 한 tool에 필요한 인자가 다른 tool의 결과여야 하는 경우, 처음엔 이 프로젝트가 직접 구현한 `Orchestrator._resolve_missing_via_other_tool()` + `AgentRunner.rewrite_request()`가 지원 tool을 찾아 불러 결과를 자연어에 반영해 요청을 다시 쓰고 재시도했는데, 이후 SDK `Runner`의 기본 다중 tool 호출 루프로 같은 일이 대체됐다(Windows 실측 확인). 이것도 다리를 새로 놓는 게 아니라 "이미 등록된 다른 tool 중 도움이 될 걸 찾아 그때그때 밟는" 것뿐이라 — 못 찾거나 실패하면 조용히 숨기지 않고 원래대로 정직하게 실패한다(`ARCHITECTURE.md`/`limitation.md`에 구현·한계 상세).
 
 ## 우선순위 제안 (진행 상황)
 
@@ -106,11 +106,12 @@ Claude connector 등이 쓰는 MCP(Model Context Protocol)는 지금까지 설�
 3. 이후 레거시들은 신규 개발자가 가이드만 보고 어댑터를 작성 — `services/weather/`(외부 실 API, Open-Meteo)로 가이드가 실제로 통하는지 검증. `services/subscription_weather_flow/`로 "서비스가 서비스를 조합"하는 세 번째 패턴(가이드에 아직 없던 유형)까지 추가로 확인
 
 **가이드 문서화 이후 추가로 구현된 것** (원래 5가지 과제 중 나머지를 실제 동작으로 검증):
-- `manual_review` judged 노드와 오케스트레이터 라우팅(`OpenAIRunner`)에 실제 OpenAI 호출 연결 — `framework/llm/openai_client.py`
-- `services/` auto-discovery + 기동 시점 일관성 검사 (`registry.validate()`) — "3. Agent 내 신규 서비스 추가 시 병렬로 독립적 추가가 가능한 구조" 과제를 오케스트레이터뿐 아니라 조립 지점(`main.py`)까지 무손대기로 달성
+- `manual_review`가 judged(AI 판단) 노드에서 human_action(사람 판단) 노드로 전환됨 — "manual_review"라는 이름과 실제 행동의 모순을 해소(`ARCHITECTURE.md`의 "human-in-the-loop" 절)
+- `services/` auto-discovery + 기동 시점 일관성 검사 (`registry.validate()`) — "3. Agent 내 신규 서비스 추가 시 병렬로 독립적 추가가 가능한 구조" 과제를 라우팅 계층뿐 아니라 조립 지점(`main.py`)까지 무손대기로 달성
 - 외부 API 서비스 4개(`public_holiday`/`exchange_rate`/`ip_geolocation`/`university_search`) 추가로 "tool 라우팅은 되는데 인자 채우기는 안 된다"는 구조적 한계를 실측(`limitation.md`)
-- `AgentRunner.extract_arguments()` 추가 — 자연어에서 tool 인자를 최대한 추측해 채우는 단계. kwargs 없이 순수 자연어 요청만으로도 라우팅부터 실행까지 끝까지 도는 첫 사례(`orchestrator.handle("미국에 있는 대학 5개만 보여줘")`)
-- `AgentRunner.rewrite_request()` + `Orchestrator._resolve_missing_via_other_tool()` 추가 — 사람이 미리 고정해두지 않은 두 tool을 그때그때 이어야 하는 요청(`orchestrator.handle("143.248.1.1이 위치한 나라의 대학교 5개를 알려줘")`)을 지원 tool 호출 + 요청 재작성 + 재시도로 처리
+- 인자 채우기 자동화 — 처음엔 이 프로젝트가 직접 구현한 `AgentRunner.extract_arguments()`로, kwargs 없이 순수 자연어 요청만으로도 라우팅부터 실행까지 끝까지 도는 첫 사례를 만듦
+- 고정 조합 없는 두 tool을 그때그때 잇는 것 — 처음엔 `AgentRunner.rewrite_request()` + `Orchestrator._resolve_missing_via_other_tool()`로 지원 tool 호출 + 요청 재작성 + 재시도 방식 구현
+- **(2026-08-07 업데이트) OpenAI Agents SDK로 전면 마이그레이션** — 위 두 항목을 포함해 이 프로젝트가 손으로 재구현했던 tool 등록/guardrail/라우팅/인자 추출/동적 tool 체이닝을 실제 SDK(`openai-agents`)의 `Agent`+`Runner`로 교체했다(`framework/orchestrator.py` 삭제). `WorkflowRegistry`/`StateMachine`(결정론적 그래프)와 `BaseAdapter`/`SemanticMapping`(레거시 연동)은 SDK 스코프 밖이라 그대로 유지. 핵심 위험 구간(단일 tool 호출, 동적 다중 tool 체이닝, human-in-the-loop pause/resume) 전부 Windows 실측으로 검증 완료 — 상세는 `ARCHITECTURE.md`의 "SDK 마이그레이션" 절.
 - 구체적 구현·검증 내역, 남은 한계는 `ARCHITECTURE.md` 참고 (as-built 문서, 이 문서보다 최신 상태 유지)
 
 ---

@@ -1,20 +1,21 @@
 from __future__ import annotations
 
+import ast
 import json
-import os
 import pathlib
-import re
 from typing import Any
 
+from agents import Agent, Runner
+from agents.exceptions import UserError
 from dotenv import load_dotenv
 
 import services
+from framework.harness.guardrail import output_schema_guardrail
 from framework.harness.logging_setup import configure_logging, get_logger
-from framework.llm.openai_client import complete
-from framework.orchestrator import Orchestrator
 from framework.prompts.store import PromptStore
 from framework.registry.decorators import registry
 from framework.registry.discovery import discover_services
+from framework.workflow.state_machine import AwaitingHumanAction, StateMachine
 
 logger = get_logger("main")
 
@@ -24,134 +25,155 @@ configure_logging()  # LOG_LEVEL 환경변수(기본 INFO) — discover_services
 FRAMEWORK_DIR = pathlib.Path(__file__).parent / "framework"
 
 discover_services(services)  # services/<name>/workflow.py를 전부 import해 등록 트리거
-registry.validate()  # 등록된 tool/guardrail 사이 참조 무결성 검사 (workflow_step/next는 각 파일이 import 시점에 자체 검증)
+registry.validate()  # 등록된 tool 카탈로그 참조 무결성 검사 (workflow_step/next는 각 파일이 import 시점에 자체 검증)
 
 
-class FirstMatchRunner:
-    """OpenAI Agents SDK Agent/Runner를 대체하는 스캐폴드용 스텁. OPENAI_API_KEY가
-    없을 때(오프라인 샘플 테스트) build_orchestrator()의 기본 fallback으로 쓰인다.
+def build_triage_agent() -> Agent:
+    """예전 `Orchestrator`/`AgentRunner`(choose_tool/extract_arguments/rewrite_request)를
+    전부 대신한다 — tool 선택, 누락 인자 자연어 추출, 고정 조합 없는 tool 간 동적 연결까지
+    SDK의 `Agent`+`Runner`가 기본 동작으로 처리한다.
 
-    실제 배포 시에는 이 Protocol 구현체만 SDK 기반으로 교체하면 되고,
-    orchestrator.py의 라우팅 엔진 코드는 건드리지 않는다.
+    지금은 flat 구조(모든 tool을 하나의 Agent에)로 시작한다 — 지금 8개 tool이 아직 도메인별로
+    뚜렷하게 나뉘지 않아서, handoff 트리(Triage Agent → Service Agent들)로 미리 쪼개는 건
+    과한 구조다. 도메인이 늘어나 실제로 나눌 필요가 생기면 그때 handoffs=[...]를 도입한다.
+
+    `tool_use_behavior`는 **기본값을 그대로 쓴다**(`run_llm_again`) — 처음엔
+    `"stop_on_first_tool"`로 시작했는데, 이게 "첫 tool 호출 즉시 멈춘다"는 뜻이라 `ip_geolocation`
+    → `university_search`처럼 tool을 이어서 불러야 하는 요청에서 **두 번째 tool 호출 자체가
+    안 일어나는** 걸 Windows 실측으로 확인했다(§ ARCHITECTURE.md의 SDK 마이그레이션 절). 페어마다
+    고정 composition tool을 만드는 임시방편도 시도했지만 사용자가 "질문이 바뀌면(예: 통화로)
+    또 새로 만들어야 하지 않냐"고 지적해서 되돌렸다 — 근본적으로 tool_use_behavior 자체를
+    고쳐야 하는 문제였다. 구조화된 dict를 그대로 돌려받는 건(모델이 재요약/재작성하지 않고)
+    `tool_use_behavior`가 아니라 `_extract_last_tool_output()`이 `result.new_items`에서
+    tool의 원본 반환값을 직접 꺼내는 방식으로 해결한다(아래).
     """
-
-    def choose_tool(self, request: str, tool_catalog: list[dict[str, Any]], prompt: str) -> str:
-        # 이름이 긴 tool부터 검사한다 — 짧은 이름이 긴 이름의 substring인 경우
-        # (예: "weather"가 "subscription_weather_flow" 안에 포함됨) 오탐을 막기 위함.
-        for entry in sorted(tool_catalog, key=lambda e: len(e["name"]), reverse=True):
-            if entry["name"] in request:
-                return entry["name"]
-        raise ValueError(f"no tool matched request: {request!r}")
-
-    def extract_arguments(
-        self, request: str, tool_name: str, input_schema: dict[str, Any], known: dict[str, Any]
-    ) -> dict[str, Any]:
-        # 진짜 자연어 이해가 아니라 거친 휴리스틱이다 — 오프라인 스텁이라는 원래
-        # 성격 그대로, 숫자형 필드만 요청 문자열에서 첫 숫자를 뽑아 채운다. 문자열형
-        # 필드(국가 코드 등)는 이 스텁으로는 못 채운다 — "미국" -> "US" 같은 변환은
-        # 진짜 의미 이해가 필요해서 OpenAIRunner(실제 LLM) 쪽 몫으로 남겨둔다.
-        #
-        # type_ is int로는 안 된다 — 이 프로젝트 전체가 `from __future__ import
-        # annotations`를 쓰기 때문에 런타임엔 타입 힌트가 실제 타입 객체가 아니라
-        # 문자열("int")로 들어온다(PEP 563, 지연 평가). 그래서 문자열/실제 타입
-        # 둘 다 받아들이도록 이름으로 비교한다.
-        extracted: dict[str, Any] = {}
-        for name, type_ in input_schema.items():
-            type_name = type_ if isinstance(type_, str) else getattr(type_, "__name__", str(type_))
-            if type_name == "int":
-                match = re.search(r"\d+", request)
-                if match:
-                    extracted[name] = int(match.group())
-        logger.debug("FirstMatchRunner.extract_arguments: request=%r -> %s (숫자 필드만 채움)", request, extracted)
-        return extracted
-
-    def rewrite_request(self, request: str, learned: dict[str, Any]) -> str:
-        # 진짜 자연어 재작성이 아니라 거친 휴리스틱이다 — 알아낸 사실을 괄호로 덧붙일 뿐,
-        # "미국에 있는" 같은 자연스러운 삽입은 OpenAIRunner(실제 LLM) 쪽 몫으로 남겨둔다.
-        facts = ", ".join(f"{k}={v}" for k, v in learned.items())
-        rewritten = f"{request} ({facts})"
-        logger.debug("FirstMatchRunner.rewrite_request: %r + %s -> %r", request, learned, rewritten)
-        return rewritten
-
-
-class OpenAIRunner:
-    """AgentRunner Protocol의 OpenAI 기반 구현체.
-
-    orchestrator.py는 이 클래스를 모른다 — Protocol에만 의존하므로 여기 교체는
-    main.py(조립 지점)에서만 일어난다.
-    """
-
-    def choose_tool(self, request: str, tool_catalog: list[dict[str, Any]], prompt: str) -> str:
-        names = {entry["name"] for entry in tool_catalog}
-        catalog_text = "\n".join(f"- {entry['name']}: {entry['description']}" for entry in tool_catalog)
-        user = (
-            f"등록된 tool 목록:\n{catalog_text}\n\n"
-            f"요청: {request}\n\n"
-            "위 tool 중 이 요청에 가장 적합한 tool의 name만 정확히 출력하라. "
-            "적합한 tool이 없으면 NONE이라고만 출력하라."
-        )
-        choice = complete(system=prompt, user=user)
-        if choice not in names:
-            raise ValueError(f"no tool matched request: {request!r} (model returned {choice!r})")
-        return choice
-
-    def extract_arguments(
-        self, request: str, tool_name: str, input_schema: dict[str, Any], known: dict[str, Any]
-    ) -> dict[str, Any]:
-        fields = "\n".join(f"- {name}: {getattr(type_, '__name__', type_)}" for name, type_ in input_schema.items())
-        user = (
-            f"tool '{tool_name}' 호출에 필요한 값 중 아직 안 채워진 필드:\n{fields}\n\n"
-            f"이미 알고 있는 값: {known}\n\n"
-            f"사용자 요청: {request}\n\n"
-            "위 요청에서 각 필드의 값을 최대한 추측해 JSON 객체 하나로만 답하라. "
-            "확실히 알 수 없는 필드는 그 키 자체를 결과에 넣지 마라(null도 쓰지 마라 — "
-            "억지로 채우는 것보다 비워두는 게 낫다). 설명이나 다른 텍스트 없이 JSON만 출력하라."
-        )
-        raw = complete(system="너는 자연어 요청에서 tool 호출 인자를 최대한 추출하는 역할이다.", user=user)
-        try:
-            parsed = json.loads(raw)
-        except json.JSONDecodeError:
-            logger.warning("extract_arguments: model output was not valid JSON: %r", raw)
-            return {}
-        if not isinstance(parsed, dict):
-            logger.warning("extract_arguments: model output was not a JSON object: %r", raw)
-            return {}
-        return parsed
-
-    def rewrite_request(self, request: str, learned: dict[str, Any]) -> str:
-        user = (
-            f"원래 요청: {request}\n\n"
-            f"방금 다른 tool을 호출해서 알아낸 정보: {learned}\n\n"
-            "이 정보를 원래 요청에 반영해서, 같은 의도를 유지한 채 그 정보가 구체적으로 "
-            "드러나도록 자연어 요청을 다시 써라. 설명 없이 새로 쓴 요청 문장만 출력하라."
-        )
-        rewritten = complete(system="너는 요청을 방금 알아낸 정보로 자연어로 다시 쓰는 역할이다.", user=user).strip()
-        logger.debug("OpenAIRunner.rewrite_request: %r + %s -> %r", request, learned, rewritten)
-        return rewritten
-
-
-def build_orchestrator() -> Orchestrator:
-    agent_runner: Any = OpenAIRunner() if os.environ.get("OPENAI_API_KEY") else FirstMatchRunner()
-    return Orchestrator(
-        registry=registry,
-        prompt_store=PromptStore(base_dir=FRAMEWORK_DIR / "prompts"),
-        agent_runner=agent_runner,
+    prompt_store = PromptStore(base_dir=FRAMEWORK_DIR / "prompts")
+    return Agent(
+        name="triage",
+        instructions=prompt_store.common_prompt(),
+        tools=registry.function_tools(),
+        output_guardrails=[output_schema_guardrail],
     )
 
 
+def handle(request: str) -> dict[str, Any]:
+    """요청 하나의 진입점. 내부적으로 `Runner.run_sync(triage_agent, request)`가
+    tool 선택부터 인자 채우기, 필요하면 여러 tool을 잇는 것까지 전부 수행한다.
+    """
+    logger.info("request received: %r", request)
+    agent = build_triage_agent()
+    try:
+        result = Runner.run_sync(agent, request)
+    except AwaitingHumanAction as e:
+        return _paused_response(e)
+    except UserError as e:
+        # failure_error_function=None(§ registry/decorators.py)은 예외를 삼키지 않고
+        # 밖으로 전파시키긴 하는데, SDK가 원본을 그대로 주지 않고 자기 UserError로 한 번
+        # 감싸서 던진다(Windows 실측으로 확인, __cause__에 원본이 그대로 남아있음). 진짜
+        # AwaitingHumanAction이면 풀어서 처리하고, 그게 아니면(진짜 tool 버그 등) 다시 던진다.
+        if isinstance(e.__cause__, AwaitingHumanAction):
+            return _paused_response(e.__cause__)
+        raise
+
+    _log_run_items(result)
+    output = _extract_last_tool_output(result)
+    logger.info("request done: result=%s", output)
+    return output
+
+
+def _extract_last_tool_output(result: Any) -> dict[str, Any]:
+    """모델이 마지막으로 부른 tool의 원본 반환값을 그대로 돌려준다 — `result.final_output`
+    (모델이 생성한 텍스트)을 안 쓴다.
+
+    `tool_use_behavior`를 기본값(모델이 필요하면 tool을 여러 번 이어 부를 수 있음)으로 둔
+    대신, "구조화된 dict를 모델이 재요약하지 않고 그대로" 받는 건 이 함수가 대신 보장한다 —
+    `result.new_items`에서 마지막 `ToolCallOutputItem`을 직접 찾아 그 안의 값을 쓴다.
+    "가장 마지막에 부른 tool의 결과가 사용자가 원한 답"이라는 전제인데, 순차 체이닝에서는
+    합리적이지만 진짜 복합 의도(예: 휴일 목록 **그리고** 대학 목록을 동시에 원하는 것)는
+    여전히 못 푼다 — 그건 이 함수가 아니라 `limitation.md`의 "증거 3"이 다루는 별개 문제다.
+    """
+    tool_outputs = [item for item in result.new_items if type(item).__name__ == "ToolCallOutputItem"]
+    if not tool_outputs:
+        raise ValueError(
+            f"tool을 하나도 안 부르고 끝났다 — final_output={result.final_output!r}. 이 프로젝트의 "
+            "모든 tool은 구조화된 dict를 반환하는 게 계약이라, tool 호출 없이 끝나면 그 계약을 "
+            "못 지킨 것이므로 명확히 실패시킨다."
+        )
+    output = tool_outputs[-1].output
+    if isinstance(output, str):
+        # tool의 반환값이 API로 오가는 과정에서 문자열로 바뀐다 — JSON(큰따옴표)일 수도,
+        # 파이썬 repr(작은따옴표)일 수도 있어서 둘 다 시도한다(§ 위 result.final_output에서
+        # 똑같은 문제를 실측으로 확인했던 것과 같은 이유).
+        try:
+            output = json.loads(output)
+        except json.JSONDecodeError:
+            output = ast.literal_eval(output)
+    return output
+
+
+def _log_run_items(result: Any) -> None:
+    """이 run 안에서 실제로 무슨 일이 일어났는지(tool을 몇 번, 어떤 순서로 불렀는지) 로그로
+    남긴다. `tool_use_behavior="stop_on_first_tool"`이 두 번째 tool 호출 자체를 막아버리는
+    경우, 지금까지는 "그다음 tool의 'Invoking tool' 로그가 안 보인다"는 **부재**로만
+    알아채야 해서 놓치기 쉬웠다(`ip_geolocation` → `university_search`가 실제로 이렇게
+    놓친 적 있음, § ARCHITECTURE.md의 SDK 마이그레이션 절). `new_items`의 각 항목 타입을
+    그대로 로깅해서, run이 몇 번째 항목·어떤 타입에서 멈췄는지 명시적으로 보이게 한다.
+    """
+    try:
+        item_types = [type(item).__name__ for item in result.new_items]
+    except AttributeError:
+        logger.debug("run items: result.new_items를 못 읽음 (SDK 버전에 따라 속성이 다를 수 있음)")
+        return
+    logger.info("run items (%d): %s", len(item_types), item_types)
+
+
+def resume(tool_name: str, context: dict[str, Any], step: str, action: dict[str, Any]) -> dict[str, Any]:
+    """`handle()`이 돌려준 일시정지 응답("context"/"step")에 사람의 answer를 채워 넣고,
+    멈췄던 지점부터 이어서 실행한다.
+
+    `Runner.run()`(SDK의 triage 루프)을 다시 타지 않는다 — 어떤 tool의 어떤 step에서
+    멈췄는지 이미 알고 있으므로 모델의 라우팅 판단이 다시 필요 없고, SDK의 Session이
+    "죽었던 tool 호출을 정확히 그 지점부터 재개"하는 걸 보장해주는지도 검증되지 않았다
+    (§ ARCHITECTURE.md의 SDK 마이그레이션 절). 예전 `Orchestrator.resume()`과 완전히
+    같은 방식 — `WorkflowRegistry`/`StateMachine`을 직접 호출한다.
+    """
+    tool_spec = registry.tool_for(tool_name)
+    if tool_spec.workflow_registry is None:
+        raise ValueError(
+            f"tool '{tool_name}'에는 workflow_registry가 없다 — @tool(workflow_registry=...)로 "
+            "연결된 tool만 resume() 대상이 될 수 있다"
+        )
+
+    context["human_action"] = action
+    logger.info("resuming: tool=%s step=%s action=%s", tool_name, step, action)
+
+    try:
+        StateMachine(registry=tool_spec.workflow_registry, entry=step).run(context)
+    except AwaitingHumanAction as e:
+        return _paused_response(e)
+
+    result = context["last_result"]
+    logger.info("resume done: tool=%s result_keys=%s", tool_name, list(result))
+    return result
+
+
+def _paused_response(e: AwaitingHumanAction) -> dict[str, Any]:
+    logger.info("request paused: tool=%s step=%s choices=%s", e.tool_name, e.step, e.choices)
+    return {
+        "status": "awaiting_human_action",
+        "tool": e.tool_name,  # @tool(pausable=True)가 자동으로 찍어둔 것 (§ registry/decorators.py)
+        "step": e.step,
+        "choices": list(e.choices),
+        "context": e.context,
+    }
+
+
 if __name__ == "__main__":
-    orchestrator = build_orchestrator()
-    #print(orchestrator.handle("subscription_status 조회해줘", applicant_id="A123"))
-    #print(orchestrator.handle("weather 조회해줘", location="Seoul"))
-    #print(orchestrator.handle("subscription_weather_flow 조회해줘", applicant_id="A123"))
-    print(orchestrator.handle("applicant_list 보여줘")["table"])
-    #print(orchestrator.handle("public_holiday 조회해줘", year=2026, country_code="US"))
-    #print(orchestrator.handle("exchange_rate 조회해줘", base="USD", symbols="KRW,EUR,JPY"))  # base=USD 자체가 미국 타겟
-    #print(orchestrator.handle("ip_geolocation 조회해줘", ip="8.8.8.8"))  # Google Public DNS — 위치가 이미 미국(Virginia)으로 잡힘
-    #print(orchestrator.handle("university_search 조회해줘", country_code="US")["universities"][:5])  # 전체는 2000개가 넘어 앞 5개만
-    print(orchestrator.handle("미국에 있는 대학 5개만 보여줘"))
-    print(orchestrator.handle("143.248.1.1의 위치한 나라를 알려줘"))
-    print(orchestrator.handle("미국의 2026년 공휴일을 알려줘"))
-    print(orchestrator.handle("미국 달러를 원화, 유로, 일본 엔으로 환전하면 얼마야?"))
-    print(orchestrator.handle("A123 신청자의 진행상황과 그 지역 날씨를 알려줘"))
-    print(orchestrator.handle("143.248.1.1이 위치한 나라의 대학교 5개를 알려줘"))  # 고정 조합이 없는 두 tool을 동적으로 이어야 하는 경우
+    print(handle("applicant_list 보여줘")["table"])
+    print(handle("서울 날씨 알려줘"))  # weather 단독 — 아직 안 돌려본 경로
+    print(handle("미국에 있는 대학 5개만 보여줘"))
+    print(handle("143.248.1.1의 위치한 나라를 알려줘"))
+    print(handle("미국의 2026년 공휴일을 알려줘"))
+    print(handle("미국 달러를 원화, 유로, 일본 엔으로 환전하면 얼마야?"))
+    print(handle("A123 신청자의 진행상황과 그 지역 날씨를 알려줘"))
+    print(handle("143.248.1.1이 위치한 나라의 대학교 5개를 알려줘"))  # 고정 조합이 없는 두 tool을 동적으로 이어야 하는 경우

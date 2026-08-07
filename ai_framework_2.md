@@ -66,7 +66,7 @@ Spring의 annotation처럼, 설정을 코드 옆에 선언적으로 붙이고 �
 - **파이프라인 단계**: `@workflow_step(order=1, source="레거시A")` 로 순서 선언
 - **Agent 판단 지점**: `@judged(confidence_required="confirmed")` 로 확률적 판단이 들어가는 곳을 명시적으로 마킹
 - **Semantic 매핑**: 코드가 아닌 별도 설정 파일(yaml/json)로 관리하되 confidence 필드를 스키마로 강제
-- **Guardrail**: `@guardrail(input=..., output=...)` 로 tool/step에 부착
+- **Guardrail**: `@guardrail(input=..., output=...)` 로 tool/step에 부착 — **(2026-08-07 업데이트, 실제 구현과 다름)** OpenAI Agents SDK 도입 이후 실제로는 이렇게 되지 않았다. Output 검증은 `@tool(output_schema=...)`로 tool 옆에 스키마만 선언해두고, 실제 차단은 tool 함수 본문이 opt-in으로 `validate_tool_output()`을 호출해야 일어난다(Agent 단위 `@output_guardrail`은 차단 권한 없이 관찰만 함). Input 쪽은 SDK가 함수 시그니처로 하는 타입 체크가 전부라 별도 데코레이터 자체가 없다 — 상세는 `ARCHITECTURE.md`의 "SDK 마이그레이션" 절.
 
 주의: annotation을 남용하면 실제 흐름을 코드만 보고 읽을 수 없게 되는 "magic" 함정에 빠진다. 데코레이터는 (1) registry 자동 등록, (2) 정책 선언(순서/confidence/guardrail)에만 한정하고, 실제 비즈니스 로직은 함수 본문에 명시적으로 남긴다.
 
@@ -78,15 +78,15 @@ Spring의 annotation처럼, 설정을 코드 옆에 선언적으로 붙이고 �
 
 그래서 새로운 종류의 질문에 답하게 하려면 "agent가 더 똑똑해지길" 기다리는 게 아니라, **그 질문에 답할 수 있는 새 경계(새 tool, 새 choices, 새 매핑)를 사람이 먼저 만들어야** 한다 — 이게 "범용 프레임워크와 커스터마이즈의 관계"(§ 위)에서 말한 "설정 레벨 customize"가 실제로 의미하는 것의 다른 얼굴이다. 실제 실험(tool 선택은 성공, 인자 채우기는 처음엔 실패)과 구체적 실패 사례는 `limitation.md` 참고.
 
-**(업데이트)** 인자 채우기의 "실패"는 이후 `AgentRunner.extract_arguments()`로 "동작은 하게" 바뀌었다 — 다만 이건 위 문단이 말한 경계(bounded choices)를 넓힌 게 아니라, 그 경계 밖(자유 생성)으로 넘어가서 감사 가능성을 포기하고 얻은 동작이다. "Agent가 스스로 경계를 넓히지 못한다"는 이 절의 핵심 주장은 그대로 유효하다 — 인자 값을 자유롭게 생성하는 것과 "새 tool/새 choices/새 매핑을 스스로 만들어내는 것"은 다른 층의 얘기다.
+**(업데이트)** 인자 채우기의 "실패"는 이후 "동작은 하게" 바뀌었다 — 처음엔 이 프로젝트가 직접 구현한 `AgentRunner.extract_arguments()`로, 이후 OpenAI Agents SDK 도입으로 SDK `Agent`+`Runner`의 기본 tool-calling으로 대체됐다(`ARCHITECTURE.md`의 "SDK 마이그레이션" 절). 메커니즘이 바뀌었어도 다만 이건 위 문단이 말한 경계(bounded choices)를 넓힌 게 아니라, 그 경계 밖(자유 생성)으로 넘어가서 감사 가능성을 포기하고 얻은 동작이라는 점은 그대로다. "Agent가 스스로 경계를 넓히지 못한다"는 이 절의 핵심 주장은 그대로 유효하다 — 인자 값을 자유롭게 생성하는 것과 "새 tool/새 choices/새 매핑을 스스로 만들어내는 것"은 다른 층의 얘기다.
 
-**(업데이트)** "두 표현을 잇는 다리가 어딘가의 실제 데이터 안에 이미 있어야 한다"(위 문단)는 주장에 한 가지 관찰이 더 붙었다 — `Orchestrator._resolve_missing_via_other_tool()`(§ `ARCHITECTURE.md`)은 그 다리를 **agent가 스스로 만들어내는 게 아니라, 이미 사람이 등록해둔 다른 tool 중에 그 역할을 해줄 게 있는지 찾아서 빌려 쓰는** 방식이다. `ip_geolocation`이라는 tool이 이미 등록돼 있고 그 output이 `university_search`의 input을 자연어로 채울 만큼 충분할 때만 성립한다 — 이 둘 다 사람이 미리 만들어둔 경계이지, agent가 그 순간 새로 연 경계가 아니다. 즉 이 기능이 하는 일은 "경계를 넓히는 것"이 아니라 "이미 열려 있는 경계들 사이를 그때그때 오가며 이어보는 것"이고, 그 시도 자체(어떤 tool을 고를지, 결과를 어떻게 자연어로 녹일지)는 여전히 자유 생성이라 위 문단의 주장을 벗어나지 않는다.
+**(업데이트)** "두 표현을 잇는 다리가 어딘가의 실제 데이터 안에 이미 있어야 한다"(위 문단)는 주장에 한 가지 관찰이 더 붙었다 — 이 프로젝트가 한동안 직접 구현했던 `Orchestrator._resolve_missing_via_other_tool()`(이후 SDK `Runner`의 기본 다중 tool 호출 루프로 대체됨, § `ARCHITECTURE.md`)은 그 다리를 **agent가 스스로 만들어내는 게 아니라, 이미 사람이 등록해둔 다른 tool 중에 그 역할을 해줄 게 있는지 찾아서 빌려 쓰는** 방식이다. `ip_geolocation`이라는 tool이 이미 등록돼 있고 그 output이 `university_search`의 input을 채울 만큼 충분할 때만 성립한다 — 이 둘 다 사람이 미리 만들어둔 경계이지, agent가 그 순간 새로 연 경계가 아니다. 즉 이 기능이 하는 일은 "경계를 넓히는 것"이 아니라 "이미 열려 있는 경계들 사이를 그때그때 오가며 이어보는 것"이고, 그 시도 자체(어떤 tool을 고를지, 인자를 어떻게 채울지)는 여전히 자유 생성이라 위 문단의 주장을 벗어나지 않는다.
 
 ## Tool-하네스 결합의 성격
 
 하네스(guardrail)는 tool과 결합되지만 강결합은 아니다. 오케스트레이터가 tool의 입력 스키마에만 커플링되고 내부 구현에는 커플링되지 않는 것과 같은 축의, 반대 방향 커플링이다.
 
-- **결합되는 것**: tool이 `@guardrail(output_schema=...)`처럼 자신의 출력 스키마·검증 규칙을 선언 → 하네스 엔진이 그 선언을 읽어서 실행
+- **결합되는 것**: tool이 `@tool(output_schema=...)`처럼 자신의 출력 스키마를 선언 → 하네스 엔진(Agent 단위 관찰 guardrail + tool 본문의 opt-in `validate_tool_output()`)이 그 선언을 읽어서 실행(**2026-08-07 업데이트**, § 위 "구현 패턴" 절)
 - **결합되지 않아야 하는 것**: 하네스 엔진 코드 자체에 특정 tool의 이름이나 도메인 규칙이 하드코딩되는 것 (`if tool_name == "legacy_a": ...` 같은 분기가 나타나면 이건 안티패턴)
 
 MCP 2025-06-18의 outputSchema/structuredContent 기능이 이 원리의 프로토콜 레벨 구현 사례다. tool이 output의 "형태"를 스키마로 선언하면 서버가 그 형태를 강제하지만, 그 안에 들어가는 값이 실제로 의미상 올바른지(semantic normalization)는 여전히 tool 내부 로직의 몫이다. 열거 가능한 필드는 enum으로 강하게 제한해 미확인 원시값(예: 레거시 코드 "99")이 스키마를 그냥 통과하지 못하게 막아야 하며, 이건 ① tool 내부 정규화 로직 ② outputSchema의 enum/type 제약 — 이중 방어로 짠다.

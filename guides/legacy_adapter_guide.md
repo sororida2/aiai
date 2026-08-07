@@ -2,6 +2,8 @@
 
 `services/subscription_status`(레거시 어댑터 + 분기 + human-in-the-loop), `services/weather`(단순 어댑터, 분기 없음), `services/subscription_weather_flow`(조합 서비스), `services/applicant_list`(입력 없는 단순 어댑터)가 아래 각 절의 살아있는 예시다. `ARCHITECTURE.md`가 "왜 이렇게 됐는가"를 설명하는 문서라면, 이 가이드는 "새 서비스를 만들 때 뭘 어떻게 쓰면 되는가"에 집중한다.
 
+**(2026-08-07 업데이트)** `@tool`이 이제 OpenAI Agents SDK의 `function_tool()`을 감싼다 — `@guardrail`이라는 별도 데코레이터는 더 이상 없다(제거됨), `output_schema`는 `@tool(...)`의 키워드 인자로 합쳐졌다. tool 라우팅·인자 추출·다중 tool 체이닝은 이제 `main.py`의 `Runner.run_sync()`(SDK)가 처리한다. 자세한 배경은 `ARCHITECTURE.md`의 "SDK 마이그레이션" 절 참고 — 이 가이드는 그 결과로 바뀐 실무 절차만 반영한다.
+
 ## 1. 새 서비스 추가 시 만들 파일
 
 | 파일 | 필수 여부 |
@@ -18,12 +20,14 @@
 
 **없으면 — `WorkflowRegistry`/`StateMachine`을 아예 안 쓴다.** `@tool` 함수 본문에서 어댑터를 직접 호출하면 끝이다.
 ```python
-@tool(name="weather", description="...")
-@guardrail(output_schema=WEATHER_OUTPUT_SCHEMA)
+WEATHER_OUTPUT_SCHEMA = {...}
+
+@tool(name="weather", description="...", output_schema=WEATHER_OUTPUT_SCHEMA)
 def weather(location: str) -> dict[str, Any]:
-    return WeatherAdapter().execute(location=location)
+    result = WeatherAdapter().execute(location=location)
+    return validate_tool_output("weather", result)
 ```
-(`weather`, `applicant_list`가 이 패턴 — `applicant_list`는 어댑터 호출 뒤 `_render_table()`로 표현까지 조립한다.)
+(`weather`, `applicant_list`가 이 패턴 — `applicant_list`는 어댑터 호출 뒤 `_render_table()`로 표현까지 조립한다.) `validate_tool_output(name, result)`(`framework/harness/guardrail.py`)은 선택이지만, tool의 output에 enum/optional 같은 세부 규칙이 있으면 반드시 부른다 — guardrail이 SDK 관례대로 tool 단위가 아니라 **Agent 단위**(`@output_guardrail`)로 옮겨가면서, 이제 어떤 tool이 결과를 만들었는지 그 자리에서 알 수 없어 tool별 세부 검증을 못 하기 때문이다(§ `ARCHITECTURE.md`의 "SDK 마이그레이션" 절, `harness/guardrail.py`의 `output_schema_guardrail` docstring).
 
 **하나라도 있으면 — 파일 전용 `WorkflowRegistry` 인스턴스를 만든다.**
 ```python
@@ -38,18 +42,29 @@ steps.validate()                    # 파일 하단에 반드시 — 이 파일�
 def build_state_machine() -> StateMachine:
     return StateMachine(registry=steps, entry="fetch_status")
 
-@tool(name="...", description="...", workflow_registry=steps)  # human_action 쓰면 필수
-@guardrail(output_schema=...)
+MY_TOOL_OUTPUT_SCHEMA = {...}
+
+@tool(
+    name="...",
+    description="...",
+    output_schema=MY_TOOL_OUTPUT_SCHEMA,
+    workflow_registry=steps,   # human_action 쓰면 필수
+    pausable=True,             # human_action 쓰면 필수 — 아래 설명
+)
 def my_tool(...) -> dict[str, Any]:
     context: dict[str, Any] = {...}
     build_state_machine().run(context)
-    return context["last_result"]
+    return validate_tool_output("...", context["last_result"])
 ```
-`@tool`에 `workflow_registry=steps`를 넘기는 건 **`human_action`(pause 가능)을 쓸 때만** 필요하다 — `Orchestrator.resume()`이 멈췄던 지점을 재개하려면 그 tool 전용 `WorkflowRegistry`를 찾아야 하기 때문이다. 안 넘기면 `resume()` 호출 시 `ValueError`로 막힌다.
+`workflow_registry=steps`와 `pausable=True`는 **`human_action`(pause 가능)을 쓸 때만** 둘 다 필요하다.
+- `workflow_registry=steps` — `main.py`의 `resume()`이 멈췄던 지점을 재개하려면 그 tool 전용 `WorkflowRegistry`를 찾아야 하기 때문. 안 넘기면 `resume()` 호출 시 `ValueError`로 막힌다.
+- `pausable=True` — SDK의 `function_tool()`은 기본적으로 tool 함수가 던진 예외를 모델에게 보여줄 에러 메시지로 바꿔버린다. `AwaitingHumanAction`이 "일시정지 신호"라는 의미를 유지하려면 이 기본값을 꺼야 한다(`function_tool(failure_error_function=None)`) — `@tool(pausable=True)`가 이 옵트아웃을 자동으로 적용한다. `subscription_status`가 실제 사례.
+
+**`@guardrail`이라는 별도 데코레이터는 이제 없다.** 예전엔 `@tool` 밑에 `@guardrail(output_schema=...)`를 따로 붙였는데, 지금은 `output_schema`가 `@tool(...)`의 키워드 인자로 합쳐졌다.
 
 ## 3. 레거시/외부 어댑터 서비스라면
 
-- `adapter.py` — `BaseAdapter` 상속. `call(self, **kwargs) -> dict[str, Any]`(프로토콜적 면 — REST/DB/인증이 이 함수 안에 갇혀야 함, 인자는 전부 keyword-only)와 `normalize(self, raw_response) -> dict[str, Any]`(의미론적 면 — `self.mapping.normalize(...)`로 얻은 `MappedValue`에서 `.value`/`.confidence`를 꺼내 `@guardrail(output_schema=...)`에 선언한 키와 1:1로 채움)를 분리 구현한다.
+- `adapter.py` — `BaseAdapter` 상속. `call(self, **kwargs) -> dict[str, Any]`(프로토콜적 면 — REST/DB/인증이 이 함수 안에 갇혀야 함, 인자는 전부 keyword-only)와 `normalize(self, raw_response) -> dict[str, Any]`(의미론적 면 — `self.mapping.normalize(...)`로 얻은 `MappedValue`에서 `.value`/`.confidence`를 꺼내 `@tool(output_schema=...)`에 선언한 키와 1:1로 채움)를 분리 구현한다. 원시 코드값 정규화가 필요 없는 외부 API(이미 사람이 읽을 수 있는 값을 주는 경우, `ip_geolocation`이 실제 사례)는 `mapping.json`/`SemanticMapping` 없이 `normalize()`에서 dict 형태만 맞추면 된다.
 - `mapping.json` — **정규화할 원시 코드값이 있는 서비스만 만든다** (`BaseAdapter.__init__`은 이걸 요구하지 않는다 — 필요한 어댑터가 자기 `__init__`에서 `self.mapping = SemanticMapping.from_json(...)`으로 직접 든다). 만들 땐 이 서비스 전용으로 새로 만든다 — 값이 다른 서비스와 우연히 같아도(예: `applicant_list`와 `subscription_status`의 상태 5종) import로 공유하지 않는다("서비스는 자기 매핑 자산을 스스로 갖는다"는 원칙). 각 엔트리는 `{"value": <정규화 문자열>, "confidence": "confirmed" | "inferred"}` 형태다.
   - `confirmed`는 사람이 레거시 명세나 실측으로 검증을 마친 매핑, `inferred`는 코드만 보고 추정했지만 아직 검증되지 않은 매핑이다.
   - 매핑에 아예 없는 raw 코드값은 `inferred`로 대충 채우지 않는다 — `UnmappedValueError`로 fail-fast하게 두고 그대로 전파시킨다("모르는 값은 모른다고 실패").
@@ -60,6 +75,10 @@ def my_tool(...) -> dict[str, Any]:
   - 이 변환을 코드로 자동화하려면, 두 표현이 동시에 나타나는 **공통 데이터(다리)**가 실제로 있는지부터 확인한다 — `university_search/mapping.json`은 Hipolabs API 자신의 응답에 `alpha_two_code`와 `country`가 같이 오길래 거기서 뽑아낸 것이지, 손으로 지어낸 게 아니다. 그런 다리가 없으면 억지로 맞추지 말고, 파라미터 이름 자체를 다르게 지어(`country_code` vs `country`처럼) 최소한 그 차이가 겉으로 드러나게 한다.
 
 ## 4. 조합 서비스(다른 tool을 부르는 서비스)라면
+
+**먼저 확인할 것 — 정말 고정 조합(`WorkflowRegistry` 기반)으로 만들어야 하는가?** SDK로 옮긴 뒤로는 `main.py`의 triage `Agent`가 필요하면 tool을 여러 번 동적으로 이어서 부르는 걸 기본으로 처리한다(`tool_use_behavior` 기본값 + `_extract_last_tool_output()`, § `ARCHITECTURE.md`의 SDK 마이그레이션 절 — `ip_geolocation`→`university_search`를 이렇게 실측 확인함). 그래서 **A의 결과가 B의 입력이 되는 관계라고 해서 무조건 고정 composition tool을 새로 만들 필요는 없다** — 대부분은 그냥 두 tool을 각자 등록해두면 모델이 알아서 이어 부른다. 아래처럼 이미 만들어져 있는 `subscription_weather_flow`는 "이 조합이 항상 함께 요청된다"는 게 명확해서 하나의 capability로 미리 묶어둔 사례이지, 데이터 의존관계가 있다고 자동으로 이렇게 만들어야 하는 건 아니다. **페어마다 고정 tool을 만드는 걸 습관화하지 말 것** — 조합이 늘어날 때마다 새로 만들어야 하는 확장 안 되는 패턴이다(실제로 이 문제로 한 번 되돌린 적 있음).
+
+그래도 고정 조합이 맞다고 판단되면(사용자가 매번 함께 요청하는 게 확실할 때), 아래 패턴을 따른다.
 
 `adapter.py`/`mapping.json`은 만들지 않는다 — 자기만의 레거시/외부 연동이 없다.
 
@@ -75,7 +94,24 @@ def query_subscription(context: dict[str, Any]) -> str:
 
 **두 tool 호출 사이에 진짜 데이터 의존관계가 있을 때만** 하나의 capability로 묶는다(A의 결과가 B의 입력이 되는 경우, `subscription_weather_flow`의 region→location). 사람이 매번 다르게 고르는 관계(`applicant_list`가 보여준 목록에서 사람이 특정 신청자를 골라 `subscription_status`로 이어가는 것)라면 묶지 말고 개별 tool로 남긴 채 프롬프트로만 안내한다.
 
-**output 스키마도 직접 import하지 않는다.** `@guardrail(output_schema={"subscription": registry.output_schema_for("subscription_status"), "weather": registry.output_schema_for("weather")})`처럼 `registry.output_schema_for("<name>")`/`input_schema_for("<name>")`로 쓴다 — `output_schema` 자체는 그 자리에서 즉시 만들어지는 진짜 dict이고, 그 안의 각 값(thunk)만 검증 시점(tool이 실제 호출될 때)에 풀린다. `harness/schema.py`의 `validate_schema()`가 이 지연 평가를 처리하므로 코드에 `lambda`가 보이지 않는다 — `discover_services()`의 import 순서와 무관하게 안전하다(`subscription_weather_flow`의 실제 사례, `ARCHITECTURE.md`의 `harness/guardrail.py` 절 참고).
+**output 스키마도 직접 import하지 않는다.** 최상위 tool 함수 본문 안에서(호출 시점에) `registry.tool_for("<name>").output_schema`로 조회해 중첩 스키마를 조립하고 `validate_schema()`로 검증한다 — `discover_services()`의 import 순서와 무관하게 안전하다(스키마 상수를 즉시 조립해야 하는 데코레이터 인자 자리가 아니라 함수 본문 안이라서 가능하다). 실제 예시(`services/subscription_weather_flow/workflow.py`):
+```python
+@tool(name="subscription_weather_flow", description="...")
+def subscription_weather_flow(applicant_id: str) -> dict[str, Any]:
+    context: dict[str, Any] = {"applicant_id": applicant_id}
+    build_state_machine().run(context)
+    result = {"subscription": context["subscription_result"], "weather": context["weather_result"]}
+
+    nested_schema = {
+        "subscription": registry.tool_for("subscription_status").output_schema,
+        "weather": registry.tool_for("weather").output_schema,
+    }
+    try:
+        validate_schema(result, nested_schema)
+    except SchemaViolation as e:
+        raise GuardrailViolation("output", "subscription_weather_flow", e.detail) from e
+    return result
+```
 
 ## 5. 함수 시그니처 규약
 
@@ -85,24 +121,26 @@ def query_subscription(context: dict[str, Any]) -> str:
 
 ## 6. 순환/재시도 안전장치 (자동, 신경 안 써도 됨)
 
-`steps.step(..., max_retries=N)`을 선언 안 해도 **기본 5**가 적용된다 — self-loop든 여러 스텝을 왕복하는 순환(evaluator 패턴 등)이든, 어떤 스텝이 완료된 실행 횟수가 `max_retries + 1`을 넘으면 `MaxRetriesExceeded`. 카운트는 `context["_step_retry_counts"]`에 저장돼 `Orchestrator.resume()`을 여러 번 거쳐도 살아남는다. "완료된" 실행만 세므로, 사람이 `human_action`의 bounded choices 밖의 값을 입력해 재시도하는 것은 이 예산을 안 쓴다 — 자동 순환 폭주 방지와 사람의 입력 실수는 별개 문제라서다.
+`steps.step(..., max_retries=N)`을 선언 안 해도 **기본 5**가 적용된다 — self-loop든 여러 스텝을 왕복하는 순환(evaluator 패턴 등)이든, 어떤 스텝이 완료된 실행 횟수가 `max_retries + 1`을 넘으면 `MaxRetriesExceeded`. 카운트는 `context["_step_retry_counts"]`에 저장돼 `main.py`의 `resume()`을 여러 번 거쳐도 살아남는다. "완료된" 실행만 세므로, 사람이 `human_action`의 bounded choices 밖의 값을 입력해 재시도하는 것은 이 예산을 안 쓴다 — 자동 순환 폭주 방지와 사람의 입력 실수는 별개 문제라서다.
 
 ## 7. 에러 포맷
 
 - `UnmappedValueError`(`framework/semantic/mapping.py`) — `mapping.json`에 없는 raw 코드값을 `normalize()`할 때, 또는 `MappedValue.require_confirmed()`를 `confidence != "confirmed"`인 값에 호출할 때. 삼키지 말고 그대로 전파시킨다.
-- `GuardrailViolation(stage, tool_name, detail)`(`framework/harness/guardrail.py`) — input/output 스키마 검증 실패. `stage`는 `"input"`/`"output"`.
+- `GuardrailViolation(stage, tool_name, detail)`(`framework/harness/guardrail.py`) — `validate_tool_output()`을 불렀는데 스키마 검증에 실패했을 때(선택적으로 부르는 fine-grained 검증, § 2/4). Agent 단위 `output_schema_guardrail`은 이제 막지 않고 관찰만 하므로, 실제로 tool 결과를 막고 싶으면 이 헬퍼를 직접 불러야 한다.
 - `MaxRetriesExceeded`(`framework/workflow/state_machine.py`) — §6 참고.
-- `judged`/`human_action`/`next` 위반은 별도 클래스 없이 평범한 `ValueError`다 — 메시지 프리픽스(`"judged node '...' returned"` / `"human_action '...' returned action"` / `"step '...' returned outcome"`)로 식별한다.
+- `judged`/`human_action`/`next` 위반은 별도 클래스 없이 평범한 `ValueError`다 — 메시지 프리픽스(`"judged node '...' returned"` / `"human_action '...' returned action"` / `"step '...' returned outcome"`)로 식별한다. `pausable=True` tool 안에서 이 `ValueError`가 나면(예: human_action의 bounded choices 위반) SDK가 삼키지 않고 밖으로 던지되 자기 `agents.exceptions.UserError`로 한 번 감싼다 — `main.py`의 `handle()`이 이미 이 언래핑을 처리하므로 새 pausable tool을 추가해도 신경 쓸 필요 없다.
 - 새 서비스에서 자체 예외를 추가할 경우, 이 네 가지 패턴(원인 그대로 전파 / 구조화된 메시지 / 카운터 기반 / 일반 ValueError) 중 성격이 가장 가까운 걸 따른다 — 새 예외 클래스를 함부로 늘리지 않는다.
 
 ## 8. 체크리스트
 
-- [ ] 오케스트레이터/`main.py`/`framework/` 코드를 한 줄도 고치지 않았는가
-- [ ] 다른 서비스를 부른다면 직접 import 대신 `registry.tool_for("<name>")`를 스텝 본문 안에서 썼는가(§4)
+- [ ] `main.py`/`framework/` 코드를 한 줄도 고치지 않았는가
+- [ ] 다른 서비스를 부른다면 직접 import 대신 `registry.tool_for("<name>")`를 스텝(또는 최상위 tool) 본문 안에서 썼는가(§4)
+- [ ] **정말 고정 composition tool이 필요한가부터 확인했는가** — SDK가 동적 tool 체이닝을 기본으로 처리하므로, 페어 전용 tool을 습관적으로 만들지 않았는가(§4)
 - [ ] 신규 tool description이 기존 tool과 의미가 겹치지 않는가 (`registry.validate()`가 못 잡는다 — 사람이 확인)
 - [ ] 새 tool이 다루는 개념(국가/통화/날짜 등)이 이미 등록된 다른 tool과 겹친다면, 같은 표현 규약을 쓰거나 최소한 파라미터 이름으로 그 차이가 드러나는가(§3, `limitation.md`)
 - [ ] inferred 매핑이 판단 분기(judged/human_action 이외)에 쓰이지 않는가
-- [ ] 미확인 코드값이 guardrail에서 fail-fast로 차단되는가
+- [ ] tool output에 enum/optional 같은 세부 규칙이 있다면 `validate_tool_output()`을 함수 본문에서 불렀는가(§2) — 안 부르면 Agent 단위 guardrail은 그 세부 규칙을 못 본다
+- [ ] `human_action`을 쓰면 `@tool`에 `workflow_registry=steps`와 `pausable=True` 둘 다 넣었는가(§2)
 - [ ] (`WorkflowRegistry`를 쓰는 경우) `workflow.py` import 시점에 `steps.validate()`가 오류 없이 통과하는가
 - [ ] `python main.py`(또는 `registry.validate()`)가 등록/참조 무결성 오류 없이 통과하는가
 
@@ -111,6 +149,6 @@ def query_subscription(context: dict[str, Any]) -> str:
 프레임워크가 자동으로 검사해주는 것(위 §6, `registry.validate()`, `steps.validate()`)은 구조/참조 무결성뿐이다 — 아래는 값과 행동을 다루므로 사람이 직접 테스트를 써야 한다.
 - `adapter.normalize()`의 값 매핑 — `call()`을 스텁으로 고정하고 각 코드값이 기대한 `(value, confidence)`로 정규화되는지, 매핑에 없는 코드값이 `UnmappedValueError`를 내는지.
 - 각 `next` 분기가 실제로 도달 가능한지 — 선언한 outcome마다 그걸 만들어내는 입력 시나리오가 있는지("죽은 분기" 탐지).
-- guardrail의 실패 케이스 — 정상 입력 통과뿐 아니라 깨진 입력에서 `GuardrailViolation`이 나는지.
+- `validate_tool_output()`을 부르는 tool이라면 그 실패 케이스 — 정상 입력 통과뿐 아니라 깨진 입력에서 `GuardrailViolation`이 나는지.
 - `human_action`의 pause→resume 전체 사이클 — bounded choices 밖 action, `payload_schemas` 위반, 정상 케이스 각각.
 - 조합 서비스는 내부에서 부르는 tool을 mock으로 격리하고 배선 로직(데이터가 올바르게 넘어가는가)만 검증.

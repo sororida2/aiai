@@ -28,6 +28,10 @@ class AwaitingHumanAction(Exception):
         self.choices = choices
         self.step: str | None = None
         self.context: dict[str, Any] | None = None
+        self.tool_name: str | None = None
+        """`@tool(pausable=True)` 래퍼가 자동으로 채운다(§ registry/decorators.py) — raise한
+        쪽(manual_review 등)은 자기가 어느 tool에 속해 있는지 몰라도 된다는 원칙을 그대로
+        유지한다. `main.py`의 resume()이 어떤 tool의 workflow_registry를 찾을지 이 값으로 안다."""
 
 
 TERMINAL = "DONE"
